@@ -1,0 +1,17 @@
+services:
+  dev:
+    build: .
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - .:/work
+      - zig-cache:/work/.zig-cache
+    working_dir: /work
+    tty: true
+    stdin_open: true
+    command: bash
+
+volumes:
+  zig-cache:
