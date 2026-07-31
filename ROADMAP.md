@@ -4,7 +4,7 @@ TCP/IP を理解することを目的とした、スモールステップの実�
 
 ## 進捗
 
-- [ ] Step 1: hexdump とバイトオーダー変換
+- [x] Step 1: hexdump とバイトオーダー変換
 - [ ] Step 2: インターネットチェックサム
 - [ ] Step 3: TAP デバイスを開いて生フレームを dump
 - [ ] Step 4: Ethernet ヘッダのパース

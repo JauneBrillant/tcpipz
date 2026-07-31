@@ -1,71 +1,30 @@
 const std = @import("std");
 const Io = std.Io;
 
-const zig_init = @import("zig_init");
+const tcpipz = @import("tcpipz");
 
 pub fn main(init: std.process.Init) !void {
-    // Prints to stderr, unbuffered, ignoring potential errors.
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
-
-    // This is appropriate for anything that lives as long as the process.
-    const arena: std.mem.Allocator = init.arena.allocator();
-
-    // Accessing command line arguments:
-    const args = try init.minimal.args.toSlice(arena);
-    for (args) |arg| {
-        std.log.info("arg: {s}", .{arg});
-    }
-
-    // In order to do I/O operations need an `Io` instance.
     const io = init.io;
 
-    // Stdout is for the actual output of your application, for example if you
-    // are implementing gzip, then only the compressed bytes should be sent to
-    // stdout, not any debugging messages.
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
-    const stdout_writer = &stdout_file_writer.interface;
+    const stdout = &stdout_file_writer.interface;
 
-    try zig_init.printAnotherMessage(stdout_writer);
-
-    try stdout_writer.flush(); // Don't forget to flush!
-}
-
-test "simple test" {
-    const gpa = std.testing.allocator;
-    var list: std.ArrayList(i32) = .empty;
-    defer list.deinit(gpa); // Try commenting this out and see if zig detects the memory leak!
-    try list.append(gpa, 42);
-    try std.testing.expectEqual(@as(i32, 42), list.pop());
-}
-
-test "fuzz example" {
-    try std.testing.fuzz({}, testOne, .{});
-}
-
-fn testOne(context: void, smith: *std.testing.Smith) !void {
-    _ = context;
-    // Try passing `--fuzz` to `zig build test` and see if it manages to fail this test case!
-
-    const gpa = std.testing.allocator;
-    var list: std.ArrayList(u8) = .empty;
-    defer list.deinit(gpa);
-    while (!smith.eos()) switch (smith.value(enum { add_data, dup_data })) {
-        .add_data => {
-            const slice = try list.addManyAsSlice(gpa, smith.value(u4));
-            smith.bytes(slice);
-        },
-        .dup_data => {
-            if (list.items.len == 0) continue;
-            if (list.items.len > std.math.maxInt(u32)) return error.SkipZigTest;
-            const len = smith.valueRangeAtMost(u32, 1, @min(32, list.items.len));
-            const off = smith.valueRangeAtMost(u32, 0, @intCast(list.items.len - len));
-            try list.appendSlice(gpa, list.items[off..][0..len]);
-            try std.testing.expectEqualSlices(
-                u8,
-                list.items[off..][0..len],
-                list.items[list.items.len - len ..],
-            );
-        },
+    // 動作確認用: サンプルの ARP 要求フレーム（Ethernet ヘッダ 14 + ARP 28 バイト）。
+    // Step 3 で TAP から読んだ実フレームに置き換わる。
+    const sample_arp_request = [_]u8{
+        // Ethernet: 宛先 MAC (ブロードキャスト) / 送信元 MAC / EtherType (ARP)
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0x02, 0x00, 0x00, 0x00, 0x00, 0x01,
+        0x08, 0x06,
+        // ARP: 誰か 192.168.70.2 の MAC を教えて（送信元 192.168.70.1）
+        0x00, 0x01, 0x08, 0x00,
+        0x06, 0x04, 0x00, 0x01, 0x02, 0x00,
+        0x00, 0x00, 0x00, 0x01, 0xc0, 0xa8,
+        0x46, 0x01, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0xc0, 0xa8, 0x46, 0x02,
     };
+    try tcpipz.hexdump.dump(stdout, &sample_arp_request);
+
+    try stdout.flush();
 }
