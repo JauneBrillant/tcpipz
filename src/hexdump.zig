@@ -78,7 +78,9 @@ test "dump: 16 バイトちょうどの 1 行" {
         0x40, 0x06, 0xb1, 0xe6, 0xac, 0x10, 0x0a, 0x63,
     });
     try std.testing.expectEqualStrings(
-        "0x0000:  4500 003c 1c46 4000 4006 b1e6 ac10 0a63\n",
+        \\0x0000:  4500 003c 1c46 4000 4006 b1e6 ac10 0a63
+        \\
+    ,
         w.buffered(),
     );
 }
@@ -94,8 +96,10 @@ test "dump: 複数行と半端な長さ" {
         0x01, 0x02, 0x03,
     });
     try std.testing.expectEqualStrings(
-        "0x0000:  4500 003c 1c46 4000 4006 b1e6 ac10 0a63\n" ++
-            "0x0010:  0102 03\n",
+        \\0x0000:  4500 003c 1c46 4000 4006 b1e6 ac10 0a63
+        \\0x0010:  0102 03
+        \\
+    ,
         w.buffered(),
     );
 }
