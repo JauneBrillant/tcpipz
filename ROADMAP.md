@@ -6,7 +6,7 @@ TCP/IP を理解することを目的とした、スモールステップの実�
 
 - [x] Step 1: hexdump とバイトオーダー変換
 - [x] Step 2: インターネットチェックサム
-- [ ] Step 3: TAP デバイスを開いて生フレームを dump
+- [x] Step 3: TAP デバイスを開いて生フレームを dump
 - [ ] Step 4: Ethernet ヘッダのパース
 - [ ] Step 5: Ethernet フレームの組み立てと送信
 - [ ] Step 6: ARP パケットのパース

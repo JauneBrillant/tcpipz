@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 
 const tcpipz = @import("tcpipz");
@@ -6,25 +7,32 @@ const tcpipz = @import("tcpipz");
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
-    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_buffer: [4096]u8 = undefined;
     var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
     const stdout = &stdout_file_writer.interface;
 
-    // 動作確認用: サンプルの ARP 要求フレーム（Ethernet ヘッダ 14 + ARP 28 バイト）。
-    // Step 3 で TAP から読んだ実フレームに置き換わる。
-    const sample_arp_request = [_]u8{
-        // Ethernet: 宛先 MAC (ブロードキャスト) / 送信元 MAC / EtherType (ARP)
-        0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-        0x02, 0x00, 0x00, 0x00, 0x00, 0x01,
-        0x08, 0x06,
-        // ARP: 誰か 192.168.70.2 の MAC を教えて（送信元 192.168.70.1）
-        0x00, 0x01, 0x08, 0x00,
-        0x06, 0x04, 0x00, 0x01, 0x02, 0x00,
-        0x00, 0x00, 0x00, 0x01, 0xc0, 0xa8,
-        0x46, 0x01, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0xc0, 0xa8, 0x46, 0x02,
-    };
-    try tcpipz.hexdump.dump(stdout, &sample_arp_request);
+    // TAP は Linux 専用。ホスト (macOS) でうっかり実行したときに
+    // 分かりやすく伝える。builtin.os.tag はコンパイル時に確定するので、
+    // macOS ビルドでは以降の Linux 専用コードは解析すらされない。
+    if (builtin.os.tag != .linux) {
+        try stdout.print("TAP デバイスは Linux でのみ使える。コンテナ内で実行すること:\n", .{});
+        try stdout.print("  docker compose up -d && docker compose exec dev bash\n", .{});
+        try stdout.flush();
+        return;
+    }
 
+    var tap = try tcpipz.tap.Tap.open(io, "tap0");
+    defer tap.close(io);
+
+    try stdout.print("tap0 を開いた。フレーム待機中... (Ctrl-C で終了)\n", .{});
     try stdout.flush();
+
+    // MTU 1500 + Ethernet ヘッダ 14 に十分な受信バッファ
+    var buf: [2048]u8 = undefined;
+    while (true) {
+        const frame = try tap.read(io, &buf);
+        try stdout.print("\n--- {d} bytes ---\n", .{frame.len});
+        try tcpipz.hexdump.dump(stdout, frame);
+        try stdout.flush();
+    }
 }
