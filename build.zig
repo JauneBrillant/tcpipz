@@ -142,10 +142,32 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
+    // エディタの build-on-save 用。実行ファイルを生成せず型検査だけを行う。
+    //
+    // main.zig は builtin.os.tag で分岐しており、native (macOS) ビルドでは
+    // TAP まわりがデッドコードになって型検査されない。そのため実行ファイルは
+    // Linux 向けだけを検査する（macOS 向けの検査対象は 4 行のガード節のみで、
+    // ほぼ意味がない）。
+    // 一方テストは、ホストで zig build test を走らせられる利点を保つため
+    // native のままにする。
+    const linux_target = b.resolveTargetQuery(.{ .os_tag = .linux });
+    const linux_mod = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = linux_target,
+    });
+    const linux_check = b.addExecutable(.{
+        .name = "check-linux",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = linux_target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "tcpipz", .module = linux_mod }},
+        }),
+    });
+
     const check_step = b.step("check", "Type-check without emitting binaries");
     check_step.dependOn(&mod_tests.step);
-    check_step.dependOn(&exe_tests.step);
-    check_step.dependOn(&exe.step);
+    check_step.dependOn(&linux_check.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
