@@ -3,6 +3,7 @@
 
 pub const hexdump = @import("hexdump.zig");
 pub const checksum = @import("checksum.zig");
+pub const ethernet = @import("ethernet.zig");
 pub const tap = @import("tap.zig");
 
 test {
@@ -11,4 +12,5 @@ test {
     // ホスト側のテスト実行でコンパイルされないよう、ここには含めない）
     _ = hexdump;
     _ = checksum;
+    _ = ethernet;
 }

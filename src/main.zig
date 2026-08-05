@@ -24,15 +24,43 @@ pub fn main(init: std.process.Init) !void {
     var tap = try tcpipz.tap.Tap.open(io, "tap0");
     defer tap.close(io);
 
-    try stdout.print("tap0 を開いた。フレーム待機中... (Ctrl-C で終了)\n", .{});
+    try stdout.print("tap0 を開いた。フレーム待機中...\n", .{});
     try stdout.flush();
 
     // MTU 1500 + Ethernet ヘッダ 14 に十分な受信バッファ
     var buf: [2048]u8 = undefined;
     while (true) {
-        const frame = try tap.read(io, &buf);
-        try stdout.print("\n--- {d} bytes ---\n", .{frame.len});
-        try tcpipz.hexdump.dump(stdout, frame);
+        const bytes = try tap.read(io, &buf);
+        try handleFrame(stdout, bytes);
         try stdout.flush();
     }
+}
+
+/// 受信したフレームを 1 つ処理する。
+/// 上位層への振り分けは EtherType で行う。この形は以降の層でも繰り返される。
+fn handleFrame(stdout: *Io.Writer, bytes: []const u8) !void {
+    const ethernet = tcpipz.ethernet;
+
+    const frame = ethernet.parse(bytes) catch |err| {
+        try stdout.print("\n--- {d} bytes: 破棄 ({s}) ---\n", .{ bytes.len, @errorName(err) });
+        return;
+    };
+
+    try stdout.print("\n--- {d} bytes  ", .{bytes.len});
+    try ethernet.formatMac(stdout, frame.src);
+    try stdout.print(" -> ", .{});
+    try ethernet.formatMac(stdout, frame.dst);
+    try stdout.print("  ", .{});
+
+    switch (frame.ethertype) {
+        .arp => try stdout.print("ARP ---\n", .{}),
+        .ipv4 => try stdout.print("IPv4 ---\n", .{}),
+        // カーネルは新しいインターフェースが上がると勝手に IPv6 の近隣探索を
+        // 始める。このスタックでは扱わないので、種別だけ出して中身は見ない。
+        .ipv6 => try stdout.print("IPv6 ---\n", .{}),
+        else => |t| try stdout.print("EtherType 0x{x:0>4} ---\n", .{@intFromEnum(t)}),
+    }
+
+    // 今はまだどの層も実装していないので、ペイロードを dump するだけ
+    try tcpipz.hexdump.dump(stdout, frame.payload);
 }
