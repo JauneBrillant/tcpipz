@@ -6,8 +6,19 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     volumes:
-      - .:/work
-      - zig-cache:/work/.zig-cache
+      # ホスト側のカレントディレクトリ. を コンテナ内の/work として見せる
+      - type: bind
+        source: .
+        target: /work
+
+      # ビルドキャッシュには、ビルドしたマシンのアーキテクチャやOS
+      # に依存した中間生成物が入る
+      # ホスト(Mac) と コンテナ(Linux) で同じキャッシュを共有すると壊れるので
+      # コンテナ側だけ別領域を使うように設定
+      - type: volume
+        source: zig-cache
+        target: /work/.zig-cache
+
     working_dir: /work
     tty: true
     stdin_open: true
