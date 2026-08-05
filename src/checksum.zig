@@ -21,15 +21,17 @@ pub fn compute(bytes: []const u8) u16 {
     // 2 バイトずつワードとして足し込む
     var i: usize = 0;
     while (i + 1 < bytes.len) : (i += 2) {
-        sum += hexdump.readU16(bytes[i..]);
+        sum += hexdump.readU16(bytes[i .. i + 2]);
     }
 
     // 奇数長: 最後の 1 バイトを上位バイトとして扱う（右側 0 パディング）
     if (bytes.len % 2 == 1) {
-        sum += @as(u32, bytes[bytes.len - 1]) << 8;
+        sum += @as(u32, bytes[i]) << 8;
     }
 
     // キャリーの折り返し。1 回の折り返しで再びあふれることがあるのでループする
+    // sum >> 16    : 上位16bitを取り出す
+    // sum & 0xffff : 下位16bitを取り出す
     while (sum >> 16 != 0) {
         sum = (sum & 0xffff) + (sum >> 16);
     }
