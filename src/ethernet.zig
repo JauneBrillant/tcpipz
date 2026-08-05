@@ -86,7 +86,11 @@ test "実物の ARP 要求をパースする" {
     const frame = try parse(&sample_arp_request);
 
     try std.testing.expectEqual(broadcast, frame.dst);
-    try std.testing.expectEqualSlices(u8, &.{ 0xde, 0xda, 0x6c, 0x00, 0x2b, 0x9c }, &frame.src);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0xde, 0xda, 0x6c, 0x00, 0x2b, 0x9c },
+        &frame.src,
+    );
     try std.testing.expectEqual(EtherType.arp, frame.ethertype);
 
     // ペイロードは ARP 本体の 28 バイト

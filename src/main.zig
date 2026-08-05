@@ -57,7 +57,10 @@ fn handleFrame(stdout: *Io.Writer, bytes: []const u8) !void {
         .ipv4 => try stdout.print("IPv4 ---\n", .{}),
         // カーネルは新しいインターフェースが上がると勝手に IPv6 の近隣探索を
         // 始める。このスタックでは扱わないので、種別だけ出して中身は見ない。
-        .ipv6 => try stdout.print("IPv6 ---\n", .{}),
+        .ipv6 => {
+            try stdout.print("IPv6 ---\n", .{});
+            return;
+        },
         else => |t| try stdout.print("EtherType 0x{x:0>4} ---\n", .{@intFromEnum(t)}),
     }
 
