@@ -4,11 +4,11 @@
 pub const hexdump = @import("hexdump.zig");
 pub const checksum = @import("checksum.zig");
 pub const ethernet = @import("ethernet.zig");
-pub const tap = @import("tap.zig");
+pub const Tap = @import("Tap.zig");
 
 test {
     // 参照したモジュールのテストをテストランナーに含める。
-    // tap.zig は I/O のみでユニットテストを持たない（Linux 専用のため
+    // Tap.zig は I/O のみでユニットテストを持たない（Linux 専用のため
     // ホスト側のテスト実行でコンパイルされないよう、ここには含めない）
     _ = hexdump;
     _ = checksum;

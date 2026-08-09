@@ -21,7 +21,7 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    var tap = try tcpipz.tap.Tap.open(io, "tap0");
+    const tap = try tcpipz.Tap.open(io, "tap0");
     defer tap.close(io);
 
     try stdout.print("tap0 を開いた。\n", .{});
@@ -52,7 +52,7 @@ pub fn main(init: std.process.Init) !void {
 /// フレーム長は 14 + 17 = 31 バイトで、最小フレーム長 60（FCS 除く）に満たない。
 /// 最小長は物理層（CSMA/CD の衝突検出）の要請なので、物理層を持たない TAP では
 /// パディング無しのまま通る。実 NIC なら送信時に NIC が 60 バイトまで埋める。
-fn sendTestFrame(io: Io, tap: tcpipz.tap.Tap) !void {
+fn sendTestFrame(io: Io, tap: tcpipz.Tap) !void {
     const ethernet = tcpipz.ethernet;
 
     var buf: [64]u8 = undefined;

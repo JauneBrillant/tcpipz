@@ -51,7 +51,7 @@ src/
   root.zig      # ライブラリのルート
   hexdump.zig   # 16 進ダンプ・バイトオーダー変換ヘルパ
   checksum.zig  # インターネットチェックサム + 疑似ヘッダ (RFC 1071)
-  tap.zig       # TAP デバイスの open / read / write
+  Tap.zig       # TAP デバイスの open / read / write（file-as-struct: 型 1 つのファイルは大文字始まり）
   ethernet.zig  # Ethernet II フレームの解析・構築
   arp.zig       # ARP: リクエスト応答とテーブル管理 (RFC 826)
   ip.zig        # IPv4: ヘッダ解析・チェックサム・フラグメント (RFC 791)
