@@ -24,7 +24,12 @@ pub fn main(init: std.process.Init) !void {
     var tap = try tcpipz.tap.Tap.open(io, "tap0");
     defer tap.close(io);
 
-    try stdout.print("tap0 を開いた。フレーム待機中...\n", .{});
+    try stdout.print("tap0 を開いた。\n", .{});
+
+    try sendTestFrame(io, tap);
+    try stdout.print("テストフレームを送出した。\n", .{});
+
+    try stdout.print("フレーム待機中...\n", .{});
     try stdout.flush();
 
     // MTU 1500 + Ethernet ヘッダ 14 に十分な受信バッファ
@@ -34,6 +39,30 @@ pub fn main(init: std.process.Init) !void {
         try handleFrame(stdout, bytes);
         try stdout.flush();
     }
+}
+
+/// Step 5 の動作確認用。まだ意味のあるプロトコルを 1 つも実装していないので、
+/// 中身は「送れたことが分かる」だけのフレームを 1 つ流す。
+///
+/// EtherType 0x88b5 は IEEE がローカル実験用に予約している値で、割り当てられた
+/// プロトコルが無い。カーネルは受け取っても渡す先が無く黙って捨てるため、
+/// 副作用を気にせず送出そのものだけを確認できる。tcpdump はプロトコル振り分けの
+/// 手前で生フレームを複製するので、捨てられるフレームでも観測はできる。
+///
+/// フレーム長は 14 + 17 = 31 バイトで、最小フレーム長 60（FCS 除く）に満たない。
+/// 最小長は物理層（CSMA/CD の衝突検出）の要請なので、物理層を持たない TAP では
+/// パディング無しのまま通る。実 NIC なら送信時に NIC が 60 バイトまで埋める。
+fn sendTestFrame(io: Io, tap: tcpipz.tap.Tap) !void {
+    const ethernet = tcpipz.ethernet;
+
+    var buf: [64]u8 = undefined;
+    const frame = try ethernet.build(&buf, .{
+        .dst = ethernet.broadcast,
+        .src = ethernet.our_mac,
+        .ethertype = @enumFromInt(0x88b5),
+        .payload = "hello from tcpipz",
+    });
+    try tap.write(io, frame);
 }
 
 /// 受信したフレームを 1 つ処理する。
@@ -58,7 +87,7 @@ fn handleFrame(stdout: *Io.Writer, bytes: []const u8) !void {
         // カーネルは新しいインターフェースが上がると勝手に IPv6 の近隣探索を
         // 始める。このスタックでは扱わないので、種別だけ出して中身は見ない。
         .ipv6 => {
-            try stdout.print("IPv6 ---\n", .{});
+            // try stdout.print("IPv6 ---\n", .{});
             return;
         },
         else => |t| try stdout.print("EtherType 0x{x:0>4} ---\n", .{@intFromEnum(t)}),

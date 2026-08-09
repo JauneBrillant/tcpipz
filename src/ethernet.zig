@@ -1,27 +1,19 @@
-//! Ethernet II フレームの解析。
-//!
-//! フレームの先頭 14 バイトがヘッダで、その後ろがペイロード。
-//!
-//!   | 宛先 MAC 6 | 送信元 MAC 6 | EtherType 2 | ペイロード ... |
-//!
-//! EtherType が「ペイロードをどの上位層に渡すか」を決める。この
-//! 「1 つのフィールドで上位層を振り分ける」構造は、IPv4 のプロトコル番号
-//! (1=ICMP, 6=TCP, 17=UDP) でも同じ形で繰り返し現れる。
+//! Ethernet II
+//! プリアンブル 7 | SFD 1 | 宛先 MAC 6 | 送信元 MAC 6 | EtherType 2 | ペイロード 46 ~ 1500 | FCS 4 |
+//! TAP で読み書きするのは 宛先 MAC 〜 ペイロード のみ（前後は物理層・NIC の担当）。
 
 const std = @import("std");
 const hexdump = @import("hexdump.zig");
 
-/// ヘッダの長さ。TAP から読めるフレームには FCS（末尾の CRC）は含まれない。
 pub const header_len = 14;
-
 pub const Mac = [6]u8;
-
-/// 全員宛。ARP 要求のように「このセグメントの誰か」に呼びかけるときに使う。
 pub const broadcast: Mac = @splat(0xff);
+/// このスタック自身の MAC アドレス。
+/// 先頭の `0x02` は bit0 (I/G) = 0: ユニキャスト、bit1 (U/L) = 1: ローカル管理。
+/// ローカル管理を宣言しているので、勝手に決めた値でも実在の NIC と衝突しない。
+pub const our_mac: Mac = .{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x02 };
 
-/// ペイロードをどの上位層で解釈するかを示す。
-/// 1500 以下の値は Ethernet II ではなく古い IEEE 802.3 の「長さ」を意味するが、
-/// 現代のネットワークではまず現れないのでここでは扱わない。
+/// EtherType が「ペイロードをどの上位層に渡すか」を決める
 pub const EtherType = enum(u16) {
     ipv4 = 0x0800,
     arp = 0x0806,
@@ -33,13 +25,12 @@ pub const Frame = struct {
     dst: Mac,
     src: Mac,
     ethertype: EtherType,
-    /// 入力スライスの中を指す。コピーはしない。
     payload: []const u8,
 };
 
 pub const ParseError = error{FrameTooShort};
 
-/// フレームをヘッダとペイロードに分解する。純粋関数で、I/O も確保も行わない。
+/// フレームをヘッダとペイロードに分解する
 pub fn parse(bytes: []const u8) ParseError!Frame {
     if (bytes.len < header_len) return error.FrameTooShort;
     return .{
@@ -50,7 +41,21 @@ pub fn parse(bytes: []const u8) ParseError!Frame {
     };
 }
 
-/// MAC アドレスを 02:00:00:00:00:02 の形式で書き出す。
+pub const BuildError = error{BufferTooSmall};
+
+/// フレームをバイト列に組み立てる（parse の逆）
+pub fn build(buf: []u8, frame: Frame) BuildError![]u8 {
+    const frame_len = header_len + frame.payload.len;
+    if (buf.len < frame_len) return error.BufferTooSmall;
+
+    @memcpy(buf[0..6], &frame.dst);
+    @memcpy(buf[6..12], &frame.src);
+    hexdump.writeU16(buf[12..14], @intFromEnum(frame.ethertype));
+    @memcpy(buf[header_len..frame_len], frame.payload);
+
+    return buf[0..frame_len];
+}
+
 pub fn formatMac(writer: *std.Io.Writer, mac: Mac) std.Io.Writer.Error!void {
     for (mac, 0..) |b, i| {
         if (i != 0) try writer.writeByte(':');
@@ -58,31 +63,25 @@ pub fn formatMac(writer: *std.Io.Writer, mac: Mac) std.Io.Writer.Error!void {
     }
 }
 
-/// Step 3 でコンテナ内の tcpdump から採取した実物の ARP 要求（42 バイト）。
-/// カーネル (192.168.70.1) が 192.168.70.2 の MAC を尋ねている。
 const sample_arp_request = [_]u8{
     // Ethernet ヘッダ
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // 宛先: ブロードキャスト
     0xde, 0xda, 0x6c, 0x00, 0x2b, 0x9c, // 送信元: カーネル側の MAC
     0x08, 0x06, // EtherType: ARP
-    // ペイロード（ARP 本体 28 バイト。中身は Step 6 で扱う）
-    0x00, 0x01,
-    0x08, 0x00,
-    0x06, 0x04,
-    0x00, 0x01,
-    0xde, 0xda,
-    0x6c, 0x00,
-    0x2b, 0x9c,
-    0xc0, 0xa8,
-    0x46, 0x01,
-    0x00, 0x00,
-    0x00, 0x00,
-    0x00, 0x00,
-    0xc0, 0xa8,
-    0x46, 0x02,
+
+    // ペイロード = ARP 本体 (RFC 826)
+    0x00, 0x01, // ハードウェア種別: Ethernet
+    0x08, 0x00, // プロトコル種別: IPv4
+    0x06, // ハードウェアアドレス長
+    0x04, // プロトコルアドレス長
+    0x00, 0x01, // オペレーション: Request
+    0xde, 0xda, 0x6c, 0x00, 0x2b, 0x9c, // 送信元 MAC
+    0xc0, 0xa8, 0x46, 0x01, // 送信元 IP: 192.168.70.1
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 宛先 MAC: 問い合わせ中なので 0
+    0xc0, 0xa8, 0x46, 0x02, // 宛先 IP: 192.168.70.2 (このスタック)
 };
 
-test "実物の ARP 要求をパースする" {
+test "ARP 要求をパースする" {
     const frame = try parse(&sample_arp_request);
 
     try std.testing.expectEqual(broadcast, frame.dst);
@@ -99,7 +98,9 @@ test "実物の ARP 要求をパースする" {
     try std.testing.expectEqual(@as(u16, 1), hexdump.readU16(frame.payload[0..2]));
 }
 
-test "ペイロードは入力スライスへの参照（コピーしない）" {
+// 1500バイトのフレームが毎秒何万とくることが想定されるので
+// パースの度にペイロードをコピーする変更を許さない
+test "ペイロードは入力スライスへの参照" {
     const frame = try parse(&sample_arp_request);
     try std.testing.expectEqual(
         @intFromPtr(&sample_arp_request[header_len]),
@@ -120,6 +121,48 @@ test "未知の EtherType も値を保持できる" {
     hexdump.writeU16(bytes[12..14], 0x1234);
     const frame = try parse(&bytes);
     try std.testing.expectEqual(@as(u16, 0x1234), @intFromEnum(frame.ethertype));
+}
+
+test "組み立てた結果は実物のバイト列と一致する" {
+    var buf: [64]u8 = undefined;
+    const bytes = try build(&buf, .{
+        .dst = broadcast,
+        .src = .{ 0xde, 0xda, 0x6c, 0x00, 0x2b, 0x9c },
+        .ethertype = .arp,
+        .payload = sample_arp_request[header_len..],
+    });
+    try std.testing.expectEqualSlices(u8, &sample_arp_request, bytes);
+}
+
+test "build した結果を parse で戻せる" {
+    var buf: [64]u8 = undefined;
+    const original: Frame = .{
+        .dst = broadcast,
+        .src = our_mac,
+        .ethertype = .ipv4,
+        .payload = "hello",
+    };
+    const parsed = try parse(try build(&buf, original));
+    // original ptr -> 実行ファイルの定数領域を指す
+    // parsed   ptr -> スタック上のbufを指す
+    // ので、expectEqualDeepでの比較をする
+    try std.testing.expectEqualDeep(original, parsed);
+}
+
+test "バッファが足りなければエラー" {
+    // ヘッダ 14 + ペイロード 5 = 19 バイト必要
+    var buf: [18]u8 = undefined;
+    try std.testing.expectError(error.BufferTooSmall, build(&buf, .{
+        .dst = broadcast,
+        .src = our_mac,
+        .ethertype = .ipv4,
+        .payload = "hello",
+    }));
+}
+
+test "our_mac はローカル管理のユニキャストアドレス" {
+    try std.testing.expectEqual(@as(u8, 0), our_mac[0] & 0b01); // I/G: ユニキャスト
+    try std.testing.expectEqual(@as(u8, 0b10), our_mac[0] & 0b10); // U/L: ローカル管理
 }
 
 test "formatMac" {
