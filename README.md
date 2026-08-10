@@ -9,26 +9,25 @@ flowchart TB
     subgraph host["macOS ホスト"]
         subgraph container["Docker コンテナ (debian)"]
             subgraph user["ユーザランド"]
-                prog["自作スタック"]
+                prog["自作スタック<br/>192.168.70.2<br/>02:00:00:00:00:02"]
                 tools["ping / tcpdump"]
             end
             subgraph kernel["Linux カーネル"]
-                netstack["カーネルの<br/>TCP/IP スタック<br/>192.168.70.1"]
-                tap["tap0<br/>仮想 NIC"]
+                netstack["カーネルの<br/>TCP/IP スタック"]
+                tap["tap0 仮想NIC<br/>192.168.70.1"]
             end
         end
     end
 
-    prog <-->|"read/write<br/>/dev/net/tun"| tap
+    prog <-->|"/dev/net/tun を<br/>read / write"| tap
     tap <-->|"Ethernet フレーム"| netstack
     tools -->|"ソケット API"| netstack
 ```
 
 - `tap0` はカーネルから見れば本物の NIC。違いは向こう側にケーブルではなくこのプログラムがいること
+- 2 つのアドレスは性質が違う。`192.168.70.1` は `ip addr add` でカーネルが `tap0` に付与したもの。`192.168.70.2` はこのプログラムがコード内で自称しているだけで、カーネルは存在を知らない
 - カーネルが `tap0` へ送ったフレームは `/dev/net/tun` の fd から `read` で取り出せる。`write` したものはカーネルには「`tap0` が受信したフレーム」に見える
-- だから対向で `ping` や `tcpdump` がそのまま動く
 - コンテナに `NET_ADMIN` と `/dev/net/tun` のマッピングが必要（`compose.yaml` で設定済み）
-- キャリアが立つのはこのプログラムが fd を開いている間だけ。起動していなければ `ip link` は `NO-CARRIER` を表示する
 
 ## 受信経路
 
@@ -54,8 +53,8 @@ flowchart BT
 ```
 
 - 各層には「ペイロードを誰に渡すか」を決めるフィールドが 1 つある。矢印のラベルがその値
-- Ethernet は EtherType、IPv4 はプロトコル番号、L4 はポート番号 — 見る場所が違うだけで判断の形は同じ
-- 点線だけが例外。IPv4 は送信時に宛先 MAC を ARP に尋ねるため、ここだけ上位層が下位層に降りる。ARP を IPv4 より先に実装するのはこの依存の向きによる
+- Ethernet は EtherType、IPv4 はプロトコル番号、L4 はポート番号
+- 点線だけが例外。IPv4 は送信時に宛先 MAC を ARP に尋ねるため、ここだけ上位層が下位層に降りる。
 - IPv6 はカーネルが勝手に近隣探索を始めるため受信するが、このスタックでは扱わず破棄する
 
 ---
