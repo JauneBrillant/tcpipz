@@ -4,6 +4,41 @@ Zig で TCP/IP プロトコルスタックをスクラッチから自作する�
 
 現在 **Step 6 / 24**（ARP パケットのパースまで）。
 
+## 実行環境
+
+ホストは macOS だが TAP は Linux の機能なので、実行は Docker コンテナ内で行う。
+
+```mermaid
+flowchart TB
+    subgraph host["macOS ホスト"]
+        subgraph container["Docker コンテナ (debian)"]
+            subgraph user["ユーザランド"]
+                prog["自作スタック<br/>zig build run"]
+                tools["ping / tcpdump"]
+            end
+            subgraph kernel["Linux カーネル"]
+                netstack["カーネルの<br/>TCP/IP スタック<br/>192.168.70.1"]
+                tap["tap0<br/>仮想 NIC"]
+            end
+        end
+    end
+
+    prog <-->|"read/write<br/>/dev/net/tun"| tap
+    tap <-->|"Ethernet フレーム"| netstack
+    tools -->|"ソケット API"| netstack
+
+    classDef mine fill:#cfe3c8,stroke:#3d7053,stroke-width:2px,color:#22302a
+    classDef other fill:none,stroke:#8b9691,stroke-width:1px,color:#8b9691
+    class prog mine
+    class netstack,tap,tools other
+```
+
+**`tap0` はカーネルから見れば本物の NIC。** 違いは、その向こう側にケーブルではなくこのプログラムがいること。カーネルが `tap0` へ送信したフレームは `/dev/net/tun` の fd から `read` で取り出せ、逆に `write` したものはカーネルには「`tap0` が受信したフレーム」として見える。だから対向で `ping` や `tcpdump` がそのまま動く。
+
+コンテナに `NET_ADMIN` ケーパビリティと `/dev/net/tun` のマッピングが必要なのはこのため（`compose.yaml` で設定済み）。
+
+なお `tap0` にキャリアが立つのは**このプログラムが fd を開いている間だけ**。起動していない状態ではカーネルは `tap0` にフレームを流さない（`ip link` で `NO-CARRIER` と表示される）。
+
 ## 受信経路
 
 TAP から読んだフレームが、どのフィールドを見てどの層に渡されるか。
