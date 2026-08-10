@@ -82,7 +82,11 @@ fn handleFrame(stdout: *Io.Writer, bytes: []const u8) !void {
     try stdout.print("  ", .{});
 
     switch (frame.ethertype) {
-        .arp => try stdout.print("ARP ---\n", .{}),
+        .arp => {
+            try stdout.print("ARP ---\n", .{});
+            try printArp(stdout, frame.payload);
+            return;
+        },
         .ipv4 => try stdout.print("IPv4 ---\n", .{}),
         // カーネルは新しいインターフェースが上がると勝手に IPv6 の近隣探索を
         // 始める。このスタックでは扱わないので、種別だけ出して中身は見ない。
@@ -95,4 +99,24 @@ fn handleFrame(stdout: *Io.Writer, bytes: []const u8) !void {
 
     // 今はまだどの層も実装していないので、ペイロードを dump するだけ
     try tcpipz.hexdump.dump(stdout, frame.payload);
+}
+
+/// パースした ARP を tcpdump 風の 1 行にする。
+fn printArp(stdout: *Io.Writer, payload: []const u8) !void {
+    const arp = tcpipz.arp;
+
+    const packet = arp.parse(payload) catch |err| {
+        try stdout.print("破棄 ({s})\n", .{@errorName(err)});
+        return;
+    };
+    switch (packet.oper) {
+        .request => {
+            try stdout.print("who has ", .{});
+            try arp.formatIp(stdout, packet.target_ip);
+            try stdout.print("? tell ", .{});
+            try arp.formatIp(stdout, packet.sender_ip);
+            try stdout.print("\n", .{});
+        },
+        else => |o| try stdout.print("oper {d}\n", .{@intFromEnum(o)}),
+    }
 }
