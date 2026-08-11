@@ -16,7 +16,7 @@ if ! ip link show tap0 >/dev/null 2>&1; then
     # mode tun にすると Ethernet ヘッダの無い IP パケットが届くので、
     # Ethernet の解析から自作するこのプロジェクトでは tap でなければならない
     # （Tap.zig の IFF_TAP と同じ指定を、コマンド側から行っている）。
-    # add で作ったデバイスは永続。スタックの TUNSETIFF でも作れるが、
+    # add で作ったデバイスは永続。自作スタックの TUNSETIFF でも作れるが、
     # それだとプロセス終了時に消えて IP の割り当てもやり直しになる
     ip tuntap add dev tap0 mode tap
 
