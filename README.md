@@ -15,23 +15,23 @@ flowchart TB
     subgraph host["macOS ホスト"]
         subgraph container["Docker コンテナ (debian)"]
             subgraph user["ユーザランド"]
-                prog["自作スタック<br/>192.168.70.2<br/>02:00:00:00:00:02"]
+                prog["自作スタック 192.168.70.2"]
                 tools["ping / tcpdump / nc"]
             end
             subgraph kernel["Linux カーネル"]
-                netstack["カーネルの<br/>TCP/IP スタック"]
-                tap["tap0 仮想NIC<br/>192.168.70.1"]
+                netstack["カーネルの TCP/IP スタック"]
+                tap["tap0 仮想NIC 192.168.70.1"]
             end
         end
     end
 
-    prog <-->|"/dev/net/tun を<br/>read / write"| tap
+    prog <-->|"/dev/net/tun を read / write"| tap
     tap <-->|"Ethernet フレーム"| netstack
     tools -->|"ソケット API"| netstack
 ```
 
 - `tap0` はカーネルから見れば本物の NIC。違いは向こう側にケーブルではなくこのプログラムがいること
-- `192.168.70.1` は `ip addr add` でカーネルが `tap0` に付与したもの
+- IP`192.168.70.1` は `ip addr add` でカーネルが `tap0` に付与したもの
 - IP `192.168.70.2`、MAC `02:00:00:00:00:02` は自作スタックのコード内で自称しているだけで、カーネルは存在を知らない。MAC の先頭 `0x02` はローカル管理ビットで、実在の NIC と衝突しないことを宣言している
 - カーネルが `tap0` へ送ったフレームは `/dev/net/tun` の fd から `read` で取り出せる。`write` したものはカーネルには「`tap0` が受信したフレーム」に見える
 - `ping` / `tcpdump` / `nc` はカーネル側のソケット API を使う。自作スタックとは別経路でカーネルに入り、`tap0` を通って対向として届く
