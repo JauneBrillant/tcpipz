@@ -1,9 +1,23 @@
 //! ARP — IPv4 アドレスから MAC アドレスを引く (RFC 826)。
+//! フレーム（L2）のペイロードとして運ばれる
 //!
 //! ARP 自体は汎用のアドレス解決プロトコルで、ハードウェア種別・プロトコル種別・
 //! アドレス長のフィールドで任意の L2/L3 の組み合わせを表現できる。
 //! このスタックでは Ethernet (MAC 6 バイト) + IPv4 (4 バイト) のみを受け入れ、
 //! それ以外は破棄する。固定オフセットでパースできるのはこの前提があるから。
+//!
+//! 合計サイズは本来可変長 (8 + hlen*2 + plen*2)。Ethernet + IPv4 なら
+//! 8 + 6*2 + 4*2 = 28 バイトに固定される。フィールド名は RFC 826 の表記
+//!
+//!   bytes 0-1   hrd  ハードウェア種別 (1 = Ethernet)
+//!   bytes 2-3   pro  プロトコル種別 (0x0800 = IPv4)
+//!   byte  4     hln  ハードウェアアドレス長 (6)
+//!   byte  5     pln  プロトコルアドレス長 (4)
+//!   bytes 6-7   op   オペレーション (1 = Request, 2 = Reply)
+//!   bytes 8-13  sha  送信元 MAC (6)
+//!   bytes 14-17 spa  送信元 IP (4)
+//!   bytes 18-23 tha  宛先 MAC (6)
+//!   bytes 24-27 tpa  宛先 IP (4)
 
 const std = @import("std");
 const hexdump = @import("hexdump.zig");
@@ -41,7 +55,7 @@ pub fn parse(bytes: []const u8) ParseError!Packet {
     // Ethernet + IPv4 以外はレイアウトが変わるため、固定オフセットで読む前に弾く
     if (hexdump.readU16(bytes[0..2]) != 1 or bytes[4] != 6) return error.UnsupportedHardware;
     // プロトコル種別は EtherType と同じ値空間を使う
-    if (hexdump.readU16(bytes[2..4]) != @intFromEnum(ethernet.EtherType.ipv4) or bytes[5] != 4)
+    if (hexdump.readU16(bytes[2..4]) != @intFromEnum(ethernet.EtherType.ip4) or bytes[5] != 4)
         return error.UnsupportedProtocol;
 
     return .{

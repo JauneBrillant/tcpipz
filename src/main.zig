@@ -15,7 +15,7 @@ pub fn main(init: std.process.Init) !void {
     // 分かりやすく伝える。builtin.os.tag はコンパイル時に確定するので、
     // macOS ビルドでは以降の Linux 専用コードは解析すらされない。
     if (builtin.os.tag != .linux) {
-        try stdout.print("TAP デバイスは Linux でのみ使える。コンテナ内で実行すること:\n", .{});
+        try stdout.print("TAP devices only work on Linux. Run inside the container:\n", .{});
         try stdout.print("  docker compose up -d && docker compose exec dev bash\n", .{});
         try stdout.flush();
         return;
@@ -24,18 +24,18 @@ pub fn main(init: std.process.Init) !void {
     const tap = try tcpipz.Tap.open(io, "tap0");
     defer tap.close(io);
 
-    try stdout.print("tap0 を開いた。\n", .{});
+    try stdout.print("Opened tap0.\n", .{});
 
     try sendTestFrame(io, tap);
-    try stdout.print("テストフレームを送出した。\n", .{});
+    try stdout.print("Sent test frame.\n", .{});
 
-    try stdout.print("フレーム待機中...\n", .{});
+    try stdout.print("Waiting for frames...\n", .{});
     try stdout.flush();
 
     // MTU 1500 + Ethernet ヘッダ 14 に十分な受信バッファ
     var buf: [2048]u8 = undefined;
     while (true) {
-        const bytes = try tap.read(io, &buf);
+        const bytes = try tap.read(io, &buf); // ブロッキング呼び出し
         try handleFrame(stdout, bytes);
         try stdout.flush();
     }
@@ -71,7 +71,7 @@ fn handleFrame(stdout: *Io.Writer, bytes: []const u8) !void {
     const ethernet = tcpipz.ethernet;
 
     const frame = ethernet.parse(bytes) catch |err| {
-        try stdout.print("\n--- {d} bytes: 破棄 ({s}) ---\n", .{ bytes.len, @errorName(err) });
+        try stdout.print("\n--- {d} bytes: dropped ({s}) ---\n", .{ bytes.len, @errorName(err) });
         return;
     };
 
@@ -87,11 +87,10 @@ fn handleFrame(stdout: *Io.Writer, bytes: []const u8) !void {
             try printArp(stdout, frame.payload);
             return;
         },
-        .ipv4 => try stdout.print("IPv4 ---\n", .{}),
-        // カーネルは新しいインターフェースが上がると勝手に IPv6 の近隣探索を
-        // 始める。このスタックでは扱わないので、種別だけ出して中身は見ない。
-        .ipv6 => {
-            // try stdout.print("IPv6 ---\n", .{});
+        .ip4 => try stdout.print("IPv4 ---\n", .{}),
+        .ip6 => {
+            // カーネルは新しいインターフェースが上がると勝手に IPv6 の近隣探索を
+            // 始める。今はまだ扱わないので即時リターンする。
             return;
         },
         else => |t| try stdout.print("EtherType 0x{x:0>4} ---\n", .{@intFromEnum(t)}),
@@ -106,7 +105,7 @@ fn printArp(stdout: *Io.Writer, payload: []const u8) !void {
     const arp = tcpipz.arp;
 
     const packet = arp.parse(payload) catch |err| {
-        try stdout.print("破棄 ({s})\n", .{@errorName(err)});
+        try stdout.print("dropped ({s})\n", .{@errorName(err)});
         return;
     };
     switch (packet.oper) {

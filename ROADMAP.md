@@ -9,7 +9,7 @@ TCP/IP を理解することを目的とした、スモールステップの実�
 - [x] Step 3: TAP デバイスを開いて生フレームを dump
 - [x] Step 4: Ethernet ヘッダのパース
 - [x] Step 5: Ethernet フレームの組み立てと送信
-- [ ] Step 6: ARP パケットのパース
+- [x] Step 6: ARP パケットのパース
 - [ ] Step 7: ARP 応答を返す 🏁
 - [ ] Step 8: ARP テーブルと ARP 要求
 - [ ] Step 9: 送信経路の共通化

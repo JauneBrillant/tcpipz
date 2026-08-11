@@ -1,6 +1,12 @@
-//! Ethernet II
-//! プリアンブル 7 | SFD 1 | 宛先 MAC 6 | 送信元 MAC 6 | EtherType 2 | ペイロード 46 ~ 1500 | FCS 4 |
-//! TAP で読み書きするのは 宛先 MAC 〜 ペイロード のみ（前後は物理層・NIC の担当）。
+//! Ethernet II フレーム。
+//! プリアンブル(7) と SFD(1) は物理層が付ける同期用の前置き、FCS(4) は末尾の
+//! 誤り検出符号 — どちらも TAP からは見えない。TAP で読み書きするのは
+//! 宛先 MAC 〜 ペイロードのみ、14 バイトのヘッダ:
+//!
+//!   bytes 0-5    dst        宛先 MAC (6)
+//!   bytes 6-11   src        送信元 MAC (6)
+//!   bytes 12-13  ethertype  EtherType (2) — 上位層への振り分け
+//!   bytes 14-    payload    ペイロード (46〜1500 バイト、可変長)
 
 const std = @import("std");
 const hexdump = @import("hexdump.zig");
@@ -15,9 +21,9 @@ pub const our_mac: Mac = .{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x02 };
 
 /// EtherType が「ペイロードをどの上位層に渡すか」を決める
 pub const EtherType = enum(u16) {
-    ipv4 = 0x0800,
+    ip4 = 0x0800,
     arp = 0x0806,
-    ipv6 = 0x86dd,
+    ip6 = 0x86dd,
     _,
 };
 
@@ -139,7 +145,7 @@ test "build した結果を parse で戻せる" {
     const original: Frame = .{
         .dst = broadcast,
         .src = our_mac,
-        .ethertype = .ipv4,
+        .ethertype = .ip4,
         .payload = "hello",
     };
     const parsed = try parse(try build(&buf, original));
@@ -155,7 +161,7 @@ test "バッファが足りなければエラー" {
     try std.testing.expectError(error.BufferTooSmall, build(&buf, .{
         .dst = broadcast,
         .src = our_mac,
-        .ethertype = .ipv4,
+        .ethertype = .ip4,
         .payload = "hello",
     }));
 }
