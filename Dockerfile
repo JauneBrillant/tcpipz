@@ -14,4 +14,8 @@ RUN curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-$(uname -m)-linu
     && ln -s /opt/zig/zig /usr/local/bin/zig \
     && rm /tmp/zig.tar.xz
 
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+
 WORKDIR /work
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

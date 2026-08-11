@@ -21,13 +21,9 @@ zig build          # ビルド
 zig build run      # 実行
 zig build test     # 全テスト実行
 zig fmt src/       # フォーマット
-
-# TAP デバイスの作成（コンテナ内、実行前に一度）
-ip tuntap add dev tap0 mode tap
-ip addr add 192.168.70.1/24 dev tap0
-ip link set tap0 up
-ethtool -K tap0 tx off   # L4 チェックサムオフロード無効化（受信検証が謎に失敗するときの切り分け）
 ```
+
+tap0 は `entrypoint.sh` がコンテナ起動時に用意する（作成・IP 付与・UP・チェックサムオフロード無効化）。手動での設定は不要。
 
 注意: tap0 にキャリアが立つのは**スタックのプロセスが fd を開いている間だけ**。スタックを起動していない状態では、カーネルは tap0 にフレームを流さない（`ip link` で `NO-CARRIER` と表示される）。
 
