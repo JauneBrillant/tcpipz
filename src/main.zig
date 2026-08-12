@@ -36,18 +36,13 @@ pub fn main(init: std.process.Init) !void {
     var buf: [2048]u8 = undefined;
     while (true) {
         const bytes = try tap.read(io, &buf); // ブロッキング呼び出し
-        try handleFrame(stdout, bytes);
+        try handleFrame(io, tap, stdout, bytes);
         try stdout.flush();
     }
 }
 
 /// Step 5 の動作確認用。まだ意味のあるプロトコルを 1 つも実装していないので、
 /// 中身は「送れたことが分かる」だけのフレームを 1 つ流す。
-///
-/// EtherType 0x88b5 は IEEE がローカル実験用に予約している値で、割り当てられた
-/// プロトコルが無い。カーネルは受け取っても渡す先が無く黙って捨てるため、
-/// 副作用を気にせず送出そのものだけを確認できる。tcpdump はプロトコル振り分けの
-/// 手前で生フレームを複製するので、捨てられるフレームでも観測はできる。
 ///
 /// フレーム長は 14 + 17 = 31 バイトで、最小フレーム長 60（FCS 除く）に満たない。
 /// 最小長は物理層（CSMA/CD の衝突検出）の要請なので、物理層を持たない TAP では
@@ -59,7 +54,7 @@ fn sendTestFrame(io: Io, tap: tcpipz.Tap) !void {
     const frame = try ethernet.build(&buf, .{
         .dst = ethernet.broadcast,
         .src = ethernet.our_mac,
-        .ethertype = @enumFromInt(0x88b5),
+        .ethertype = @enumFromInt(0x88b5), // IEEEがローカル実験用に予約している値
         .payload = "hello from tcpipz",
     });
     try tap.write(io, frame);
@@ -67,7 +62,7 @@ fn sendTestFrame(io: Io, tap: tcpipz.Tap) !void {
 
 /// 受信したフレームを 1 つ処理する。
 /// 上位層への振り分けは EtherType で行う。この形は以降の層でも繰り返される。
-fn handleFrame(stdout: *Io.Writer, bytes: []const u8) !void {
+fn handleFrame(io: Io, tap: tcpipz.Tap, stdout: *Io.Writer, bytes: []const u8) !void {
     const ethernet = tcpipz.ethernet;
 
     const frame = ethernet.parse(bytes) catch |err| {
@@ -75,47 +70,50 @@ fn handleFrame(stdout: *Io.Writer, bytes: []const u8) !void {
         return;
     };
 
-    try stdout.print("\n--- {d} bytes  ", .{bytes.len});
-    try ethernet.formatMac(stdout, frame.src);
-    try stdout.print(" -> ", .{});
-    try ethernet.formatMac(stdout, frame.dst);
-    try stdout.print("  ", .{});
-
     switch (frame.ethertype) {
         .arp => {
-            try stdout.print("ARP ---\n", .{});
-            try printArp(stdout, frame.payload);
+            try stdout.print("frame recieved : ethertype = arp\n", .{});
+            try handleArp(io, tap, stdout, frame.payload);
             return;
         },
-        .ip4 => try stdout.print("IPv4 ---\n", .{}),
-        .ip6 => {
-            // カーネルは新しいインターフェースが上がると勝手に IPv6 の近隣探索を
-            // 始める。今はまだ扱わないので即時リターンする。
+        .ip4 => {
+            try stdout.print("frame recieved : ethertype = ipv4\n", .{});
             return;
         },
-        else => |t| try stdout.print("EtherType 0x{x:0>4} ---\n", .{@intFromEnum(t)}),
+        .ip6 => return,
+        else => return,
     }
-
-    // 今はまだどの層も実装していないので、ペイロードを dump するだけ
-    try tcpipz.hexdump.dump(stdout, frame.payload);
 }
 
-/// パースした ARP を tcpdump 風の 1 行にする。
-fn printArp(stdout: *Io.Writer, payload: []const u8) !void {
+/// 受信した ARP を tcpdump 風に表示し、自分の IP 宛の要求には応答を返す。
+fn handleArp(io: Io, tap: tcpipz.Tap, stdout: *Io.Writer, payload: []const u8) !void {
     const arp = tcpipz.arp;
+    const ethernet = tcpipz.ethernet;
 
     const packet = arp.parse(payload) catch |err| {
         try stdout.print("dropped ({s})\n", .{@errorName(err)});
         return;
     };
-    switch (packet.oper) {
-        .request => {
-            try stdout.print("who has ", .{});
-            try arp.formatIp(stdout, packet.target_ip);
-            try stdout.print("? tell ", .{});
-            try arp.formatIp(stdout, packet.sender_ip);
-            try stdout.print("\n", .{});
-        },
-        else => |o| try stdout.print("oper {d}\n", .{@intFromEnum(o)}),
-    }
+
+    // 自分宛の要求だけに応答する。他ホスト宛への要求も（ブロードキャストなので）
+    // 届くが、所有していない IP に答えてはいけない
+    if (packet.oper != .request) return;
+    if (!std.mem.eql(u8, &packet.target_ip, &arp.our_ip)) return;
+
+    // 応答はブロードキャストではなく、尋ねてきた本人へユニキャストで返す
+    var arp_buf: [arp.packet_len]u8 = undefined;
+    var frame_buf: [ethernet.header_len + arp.packet_len]u8 = undefined;
+    const frame = try ethernet.build(&frame_buf, .{
+        .dst = packet.sender_mac,
+        .src = ethernet.our_mac,
+        .ethertype = .arp,
+        .payload = try arp.build(&arp_buf, arp.replyTo(packet)),
+    });
+    try tap.write(io, frame);
+
+    try stdout.print("replied: ", .{});
+    try arp.formatIp(stdout, arp.our_ip);
+    try stdout.print(" is at ", .{});
+    try ethernet.formatMac(stdout, ethernet.our_mac);
+    try stdout.print("\n", .{});
 }

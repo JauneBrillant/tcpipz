@@ -1,13 +1,9 @@
 //! ARP — IPv4 アドレスから MAC アドレスを引く (RFC 826)。
-//! フレーム（L2）のペイロードとして運ばれる
 //!
 //! ARP 自体は汎用のアドレス解決プロトコルで、ハードウェア種別・プロトコル種別・
 //! アドレス長のフィールドで任意の L2/L3 の組み合わせを表現できる。
 //! このスタックでは Ethernet (MAC 6 バイト) + IPv4 (4 バイト) のみを受け入れ、
 //! それ以外は破棄する。固定オフセットでパースできるのはこの前提があるから。
-//!
-//! 合計サイズは本来可変長 (8 + hlen*2 + plen*2)。Ethernet + IPv4 なら
-//! 8 + 6*2 + 4*2 = 28 バイトに固定される。フィールド名は RFC 826 の表記
 //!
 //!   bytes 0-1   hrd  ハードウェア種別 (1 = Ethernet)
 //!   bytes 2-3   pro  プロトコル種別 (0x0800 = IPv4)
@@ -23,9 +19,15 @@ const std = @import("std");
 const hexdump = @import("hexdump.zig");
 const ethernet = @import("ethernet.zig");
 
+/// 合計サイズは本来可変長 (8 + hlen*2 + plen*2)。Ethernet + IPv4 なら
+/// 8 + 6*2 + 4*2 = 28 バイトに固定される。
 pub const packet_len = 28;
-
 pub const Ip4 = [4]u8;
+
+/// このスタック自身の IP アドレス。
+/// カーネルはこの IP の存在を知らない — ARP 応答を返して初めて認識される。
+/// 本来IPはインターフェース（NIC, TAP, Loなど）に付与される
+pub const our_ip: Ip4 = .{ 192, 168, 70, 2 };
 
 pub const Oper = enum(u16) {
     request = 1,
@@ -64,6 +66,39 @@ pub fn parse(bytes: []const u8) ParseError!Packet {
         .sender_ip = bytes[14..18].*,
         .target_mac = bytes[18..24].*,
         .target_ip = bytes[24..28].*,
+    };
+}
+
+pub const BuildError = error{BufferTooSmall};
+
+/// ARP 本体をバイト列に組み立てる（parse の逆）
+/// hrd/pro/hln/pln は Ethernet + IPv4 の固定値を書く
+pub fn build(buf: []u8, packet: Packet) BuildError![]u8 {
+    if (buf.len < packet_len) return error.BufferTooSmall;
+
+    hexdump.writeU16(buf[0..2], 1); // ハードウェア種別: 1 = Ethernet
+    hexdump.writeU16(buf[2..4], @intFromEnum(ethernet.EtherType.ip4)); // プロトコル種別
+    buf[4] = 6; // ハードウェアアドレス長
+    buf[5] = 4; // プロトコルアドレス長
+    hexdump.writeU16(buf[6..8], @intFromEnum(packet.oper)); // オペレーション (1 = Request, 2 = Reply)
+    @memcpy(buf[8..14], &packet.sender_mac); // 送信元 MAC
+    @memcpy(buf[14..18], &packet.sender_ip); // 送信元 IP
+    @memcpy(buf[18..24], &packet.target_mac); // 宛先 MAC
+    @memcpy(buf[24..28], &packet.target_ip); // 宛先 IP
+
+    return buf[0..packet_len];
+}
+
+/// 自分宛の要求に対する応答を作る。
+/// 送信元には自分を名乗り、宛先には要求の送信元をそのまま写す。
+/// 要求では 0 埋めだった target_mac が、応答では「尋ねた本人」で埋まる。
+pub fn replyTo(request: Packet) Packet {
+    return .{
+        .oper = .reply,
+        .sender_mac = ethernet.our_mac,
+        .sender_ip = our_ip,
+        .target_mac = request.sender_mac,
+        .target_ip = request.sender_ip,
     };
 }
 
@@ -120,6 +155,33 @@ test "未知のオペレーションも値を保持する" {
     bytes[7] = 9; // RARP 域の値
     const packet = try parse(&bytes);
     try std.testing.expectEqual(@as(u16, 9), @intFromEnum(packet.oper));
+}
+
+test "parse と build で元のバイト列に戻る" {
+    var buf: [packet_len]u8 = undefined;
+    const bytes = try build(&buf, try parse(&sample_request));
+    try std.testing.expectEqualSlices(u8, &sample_request, bytes);
+}
+
+test "バッファが足りなければエラー" {
+    var buf: [packet_len - 1]u8 = undefined;
+    try std.testing.expectError(
+        error.BufferTooSmall,
+        build(&buf, try parse(&sample_request)),
+    );
+}
+
+test "要求から応答を作る" {
+    const request = try parse(&sample_request);
+    const reply = replyTo(request);
+
+    try std.testing.expectEqual(Oper.reply, reply.oper);
+    // 送信元は自分
+    try std.testing.expectEqual(ethernet.our_mac, reply.sender_mac);
+    try std.testing.expectEqual(our_ip, reply.sender_ip);
+    // 宛先は尋ねてきた本人
+    try std.testing.expectEqual(request.sender_mac, reply.target_mac);
+    try std.testing.expectEqual(request.sender_ip, reply.target_ip);
 }
 
 test "formatIp" {
