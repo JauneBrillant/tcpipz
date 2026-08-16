@@ -1,19 +1,28 @@
 //! ARP — IPv4 アドレスから MAC アドレスを引く (RFC 826)。
 //!
-//! ARP 自体は汎用のアドレス解決プロトコルで、ハードウェア種別・プロトコル種別・
-//! アドレス長のフィールドで任意の L2/L3 の組み合わせを表現できる。
-//! このスタックでは Ethernet (MAC 6 バイト) + IPv4 (4 バイト) のみを受け入れ、
-//! それ以外は破棄する。固定オフセットでパースできるのはこの前提があるから。
+//! Ethernet フレームのペイロードとして運ばれる (EtherType = 0x0806)。
+//! 28 バイトでは最小ペイロード長 46 に足りないので、末尾に詰め物が付く:
 //!
-//!   bytes 0-1   hrd  ハードウェア種別 (1 = Ethernet)
-//!   bytes 2-3   pro  プロトコル種別 (0x0800 = IPv4)
-//!   byte  4     hln  ハードウェアアドレス長 (6)
-//!   byte  5     pln  プロトコルアドレス長 (4)
-//!   bytes 6-7   op   オペレーション (1 = Request, 2 = Reply)
-//!   bytes 8-13  sha  送信元 MAC (6)
-//!   bytes 14-17 spa  送信元 IP (4)
-//!   bytes 18-23 tha  宛先 MAC (6)
-//!   bytes 24-27 tpa  宛先 IP (4)
+//!    --- Ethernet Frame with Arp packet ---
+//!   ┌─ Ethernet header 14 ─┬─ ARP packet 28 ─┬─ padding 18 ─┐
+//!   └──────────────────────┴─────────────────┴──────────────┘
+//!
+//!    --- Arp Packet ---
+//!   ┌───────┬───────┬─────┬─────┬───────┬───────┬───────┬───────┬───────┐
+//!   │  hrd  │  pro  │ hln │ pln │  op   │  sha  │  spa  │  tha  │  tpa  │
+//!   │   2   │   2   │  1  │  1  │   2   │   6   │   4   │   6   │   4   │
+//!   └───────┴───────┴─────┴─────┴───────┴───────┴───────┴───────┴───────┘
+//!   0       2       4     5     6       8       14      18      24      28
+//!
+//!   hrd  ハードウェア種別 (1 = Ethernet)
+//!   pro  プロトコル種別 (0x0800 = IPv4)
+//!   hln  ハードウェアアドレス長 (6)
+//!   pln  プロトコルアドレス長 (4)
+//!   op   オペレーション (1 = Request, 2 = Reply)
+//!   sha  送信元 MAC
+//!   spa  送信元 IP
+//!   tha  宛先 MAC
+//!   tpa  宛先 IP
 
 const std = @import("std");
 const hexdump = @import("hexdump.zig");
@@ -49,7 +58,8 @@ pub const ParseError = error{
     UnsupportedProtocol,
 };
 
-/// ARP 本体（Ethernet ペイロード）をパースする。
+/// 生のバイト列で表現された Arp 要求(Ethernet ペイロード) を Packet 構造体に変換する
+///
 /// 28 バイトを超える分は無視する（実 NIC 経由では最小フレーム長への
 /// パディングが付いてくることがある）。
 pub fn parse(bytes: []const u8) ParseError!Packet {
@@ -71,7 +81,7 @@ pub fn parse(bytes: []const u8) ParseError!Packet {
 
 pub const BuildError = error{BufferTooSmall};
 
-/// ARP 本体をバイト列に組み立てる（parse の逆）
+/// ARP 本体をバイト列に組み立てる
 /// hrd/pro/hln/pln は Ethernet + IPv4 の固定値を書く
 pub fn build(buf: []u8, packet: Packet) BuildError![]u8 {
     if (buf.len < packet_len) return error.BufferTooSmall;
@@ -89,9 +99,7 @@ pub fn build(buf: []u8, packet: Packet) BuildError![]u8 {
     return buf[0..packet_len];
 }
 
-/// 自分宛の要求に対する応答を作る。
-/// 送信元には自分を名乗り、宛先には要求の送信元をそのまま写す。
-/// 要求では 0 埋めだった target_mac が、応答では「尋ねた本人」で埋まる。
+/// 自分宛のARP要求に対するARP応答パケットを作る。
 pub fn replyTo(request: Packet) Packet {
     return .{
         .oper = .reply,
@@ -102,11 +110,71 @@ pub fn replyTo(request: Packet) Packet {
     };
 }
 
+/// 指定した IP の持ち主に MAC を尋ねる ARP 要求の Packet を作る
+pub fn requestFor(target_ip: Ip4) Packet {
+    return .{
+        .oper = .request,
+        .sender_mac = ethernet.our_mac,
+        .sender_ip = our_ip,
+        .target_mac = @splat(0),
+        .target_ip = target_ip,
+    };
+}
+
+/// IP → MAC のキャッシュ (RFC 826 の "translation table")。
+///
+/// 線形探索で足りる。同一セグメントに何百台もいる状況を想定していないし、
+/// 引くのは送信のたびに 1 回だけ。
+///
+/// 有効期限は持たない。実運用のスタックはエントリを数十秒〜数分で失効させる
+/// （相手の NIC が交換される、IP が別のホストへ移る、といったことが起きるため）が、
+/// 対向がカーネル 1 台しかいない TAP リンクではその状況が起きない。
+/// 必要になるのは複数ホストのセグメントに出たとき。
+pub const Table = struct {
+    pub const capacity = 16;
+
+    const Entry = struct {
+        ip: Ip4,
+        mac: ethernet.Mac,
+    };
+
+    entries: [capacity]Entry = undefined,
+    /// 使用中のスロット数。entries[0..len] だけが有効。
+    len: usize = 0,
+    /// 満杯のとき次に上書きするスロット。挿入した順に追い出す。
+    oldest: usize = 0,
+
+    /// 未登録なら null。呼び出し側は ARP 要求を出すことになる。
+    pub fn lookup(self: *const Table, ip: Ip4) ?ethernet.Mac {
+        for (self.entries[0..self.len]) |entry| {
+            if (std.mem.eql(u8, &entry.ip, &ip)) return entry.mac;
+        }
+        return null;
+    }
+
+    /// 登録済みの IP なら MAC を上書きする。相手の NIC が変わっても追従できる —
+    /// 有効期限を持たない代わりに、相手が話しかけてくるたびに最新化される。
+    pub fn put(self: *Table, ip: Ip4, mac: ethernet.Mac) void {
+        for (self.entries[0..self.len]) |*entry| {
+            if (std.mem.eql(u8, &entry.ip, &ip)) {
+                entry.mac = mac;
+                return;
+            }
+        }
+        if (self.len < capacity) {
+            self.entries[self.len] = .{ .ip = ip, .mac = mac };
+            self.len += 1;
+            return;
+        }
+        self.entries[self.oldest] = .{ .ip = ip, .mac = mac };
+        self.oldest = (self.oldest + 1) % capacity;
+    }
+};
+
 pub fn formatIp(writer: *std.Io.Writer, ip: Ip4) std.Io.Writer.Error!void {
     try writer.print("{d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] });
 }
 
-// Step 3 で tcpdump から採取した ARP 要求の本体（Ethernet ヘッダを除いた 28 バイト）
 const sample_request = [_]u8{
     0x00, 0x01, // ハードウェア種別: Ethernet
     0x08, 0x00, // プロトコル種別: IPv4
@@ -182,6 +250,63 @@ test "要求から応答を作る" {
     // 宛先は尋ねてきた本人
     try std.testing.expectEqual(request.sender_mac, reply.target_mac);
     try std.testing.expectEqual(request.sender_ip, reply.target_ip);
+}
+
+test "尋ねる要求を作る" {
+    const request = requestFor(.{ 192, 168, 70, 1 });
+
+    try std.testing.expectEqual(Oper.request, request.oper);
+    try std.testing.expectEqual(ethernet.our_mac, request.sender_mac);
+    try std.testing.expectEqual(our_ip, request.sender_ip);
+    // 尋ねている当の値なので 0 埋め
+    try std.testing.expectEqual(@as(ethernet.Mac, @splat(0)), request.target_mac);
+    try std.testing.expectEqual(Ip4{ 192, 168, 70, 1 }, request.target_ip);
+}
+
+const mac_a: ethernet.Mac = .{ 0xde, 0xda, 0x6c, 0x00, 0x2b, 0x9c };
+const mac_b: ethernet.Mac = .{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x09 };
+
+test "テーブル: 挿入して引く" {
+    var table: Table = .{};
+    try std.testing.expectEqual(null, table.lookup(.{ 192, 168, 70, 1 }));
+
+    table.put(.{ 192, 168, 70, 1 }, mac_a);
+    try std.testing.expectEqual(mac_a, table.lookup(.{ 192, 168, 70, 1 }));
+    // 登録していない IP は引けない
+    try std.testing.expectEqual(null, table.lookup(.{ 192, 168, 70, 3 }));
+}
+
+test "テーブル: 同じ IP は上書きし、エントリは増えない" {
+    var table: Table = .{};
+    table.put(.{ 192, 168, 70, 1 }, mac_a);
+    table.put(.{ 192, 168, 70, 1 }, mac_b);
+
+    try std.testing.expectEqual(mac_b, table.lookup(.{ 192, 168, 70, 1 }));
+    try std.testing.expectEqual(@as(usize, 1), table.len);
+}
+
+test "テーブル: 満杯なら古い順に追い出す" {
+    var table: Table = .{};
+    for (0..Table.capacity) |i| {
+        table.put(.{ 192, 168, 70, @intCast(i) }, mac_a);
+    }
+    try std.testing.expectEqual(Table.capacity, table.len);
+
+    // 1 件あふれさせると、最初に入れたものが消える
+    table.put(.{ 10, 0, 0, 1 }, mac_b);
+    try std.testing.expectEqual(Table.capacity, table.len);
+    try std.testing.expectEqual(null, table.lookup(.{ 192, 168, 70, 0 }));
+    try std.testing.expectEqual(mac_b, table.lookup(.{ 10, 0, 0, 1 }));
+    // 2 番目以降は残っている
+    try std.testing.expectEqual(mac_a, table.lookup(.{ 192, 168, 70, 1 }));
+}
+
+test "テーブル: 受信した要求からも応答からも学習できる" {
+    var table: Table = .{};
+    const request = try parse(&sample_request);
+    table.put(request.sender_ip, request.sender_mac);
+
+    try std.testing.expectEqual(request.sender_mac, table.lookup(.{ 192, 168, 70, 1 }));
 }
 
 test "formatIp" {

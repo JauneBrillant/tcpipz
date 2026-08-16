@@ -11,7 +11,7 @@ TCP/IP を理解することを目的とした、スモールステップの実�
 - [x] Step 5: Ethernet フレームの組み立てと送信
 - [x] Step 6: ARP パケットのパース
 - [x] Step 7: ARP 応答を返す 🏁
-- [ ] Step 8: ARP テーブルと ARP 要求
+- [x] Step 8: ARP テーブルと ARP 要求
 - [ ] Step 9: 送信経路の共通化
 - [ ] Step 10: IPv4 ヘッダのパース + チェックサム検証
 - [ ] Step 11: IPv4 ヘッダの組み立てと送信
