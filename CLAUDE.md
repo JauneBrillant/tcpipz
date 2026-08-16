@@ -73,7 +73,7 @@ src/
 
 ステップの一覧・順序・各ステップの理解のポイントは **[ROADMAP.md](ROADMAP.md)** にある。作業を始める前にそこの「進捗」チェックリストで現在のステップを確認し、ステップ完了時にチェックを付けること。
 
-マイルストーン: ① ARP 応答（Step 7）→ ② ping 応答（Step 13）→ ③ UDP echo（Step 15）→ ④ TCP 3-way handshake（Step 20）。
+マイルストーン: ① ARP 応答（Step 7）→ ② ping 応答（Step 12）→ ③ UDP echo（Step 14）→ ④ TCP 3-way handshake（Step 19）。
 
 ## 参照 RFC
 
