@@ -5,6 +5,7 @@ pub const hexdump = @import("hexdump.zig");
 pub const checksum = @import("checksum.zig");
 pub const ethernet = @import("ethernet.zig");
 pub const arp = @import("arp.zig");
+pub const ip = @import("ip.zig");
 pub const Tap = @import("Tap.zig");
 
 test {
@@ -15,4 +16,5 @@ test {
     _ = checksum;
     _ = ethernet;
     _ = arp;
+    _ = ip;
 }

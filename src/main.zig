@@ -44,8 +44,22 @@ pub fn main(init: std.process.Init) !void {
     try stdout.print("Waiting for frames...\n", .{});
     try stdout.flush();
 
-    // MTU 1500 + Ethernet ヘッダ 14 に十分な受信バッファ
+    // MTU 1500 + Ethernet ヘッダ 14 に十分な受信バッファ。
+    //
+    // 受信したフレームの実体はこの配列にしか無い。各層の parse はコピーを作らず、
+    // 「バッファのどこからどこまでが自分の担当か」を切り直しているだけ:
+    //
+    //   ┌─ Ethernet 14 ─┬─ IPv4 header 20 ─┬─ ICMP 64 ─┬── 未使用 ──┐
+    //   0              14                 34          98          2048
+    //   │               │                  └ ip.Packet.payload   = buf[34..98]
+    //   │               └──────────────────── ethernet.Frame.payload = buf[14..98]
+    //   └──────────────────────────────────── tap.read の戻り値      = buf[0..98]
+    //
+    // このため、パース結果のスライスが有効なのは**次の read までの間だけ**。
+    // 跨いで残したいものは値をコピーする必要がある。arp.Table のエントリが
+    // Ip4 / Mac（固定長配列 = 値）なのはそのため — put した時点でコピーされる。
     var buf: [2048]u8 = undefined;
+
     while (true) {
         const bytes = try tap.read(io, &buf); // ブロッキング呼び出し
         try handleFrame(io, tap, stdout, &table, bytes);
@@ -96,11 +110,43 @@ fn handleFrame(
         },
         .ip4 => {
             try stdout.print("frame received : ethertype = ipv4\n", .{});
+            try handleIp4(stdout, frame.payload);
             return;
         },
         .ip6 => return,
         else => return,
     }
+}
+
+/// 受信した IPv4 パケットを tcpdump 風に表示する。
+/// 上位層への振り分けはプロトコル番号で行う — EtherType と同じ構造が 1 段上でも繰り返される。
+fn handleIp4(stdout: *Io.Writer, payload: []const u8) !void {
+    const ip = tcpipz.ip;
+
+    const packet = ip.parse(payload) catch |err| {
+        try stdout.print("dropped ({s})\n", .{@errorName(err)});
+        return;
+    };
+
+    // 所有していない IP 宛のパケットに答えてはいけない。ARP のときと同じ判断
+    if (!ip.isForUs(packet)) {
+        try stdout.print("not for us: ", .{});
+        try ip.formatAddr(stdout, packet.dst);
+        try stdout.print("\n", .{});
+        return;
+    }
+
+    try ip.formatAddr(stdout, packet.src);
+    try stdout.print(" > ", .{});
+    try ip.formatAddr(stdout, packet.dst);
+    try stdout.print(": proto={s} ttl={d} len={d} payload={d}B\n", .{
+        @tagName(packet.protocol),
+        packet.ttl,
+        packet.total_len,
+        packet.payload.len,
+    });
+
+    // 上位層はまだ無い。ICMP は Step 11 から
 }
 
 /// 受信した ARP を tcpdump 風に表示し、自分の IP 宛の要求には応答を返す。

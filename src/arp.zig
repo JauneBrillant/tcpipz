@@ -31,12 +31,9 @@ const ethernet = @import("ethernet.zig");
 /// 合計サイズは本来可変長 (8 + hlen*2 + plen*2)。Ethernet + IPv4 なら
 /// 8 + 6*2 + 4*2 = 28 バイトに固定される。
 pub const packet_len = 28;
-pub const Ip4 = [4]u8;
 
-/// このスタック自身の IP アドレス。
-/// カーネルはこの IP の存在を知らない — ARP 応答を返して初めて認識される。
-/// 本来IPはインターフェース（NIC, TAP, Loなど）に付与される
-pub const our_ip: Ip4 = .{ 192, 168, 70, 2 };
+pub const Ip4 = @import("ip.zig").Addr;
+pub const our_ip = @import("ip.zig").our_addr;
 
 pub const Oper = enum(u16) {
     request = 1,
