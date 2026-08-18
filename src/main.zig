@@ -32,7 +32,7 @@ pub fn main(init: std.process.Init) !void {
     try tap.write(io, probe_frame);
     try stdout.print("startup probe: {s}\n", .{@tagName(probe)});
 
-    try stdout.print("Waiting for frames...\n", .{});
+    try stdout.print("Waiting for frames...\n\n", .{});
     try stdout.flush();
 
     var rx_buf: [2048]u8 = undefined;
@@ -68,7 +68,7 @@ fn handleFrame(
         },
         .ip4 => {
             try stdout.print("frame received : ethertype = ipv4\n", .{});
-            return try handleIp4(out, stdout, table, frame.payload);
+            return try handleIp4(stdout, frame.payload);
         },
         .ip6 => return null,
         else => return null,
@@ -108,9 +108,7 @@ fn handleArp(
 
 /// 振り分けられた IPv4 パケットを処理する
 fn handleIp4(
-    out: []u8,
     stdout: *Io.Writer,
-    table: *const tcpipz.arp.Table,
     payload: []const u8,
 ) !?[]const u8 {
     const ip = tcpipz.ip;
@@ -124,10 +122,35 @@ fn handleIp4(
         return null;
     }
 
-    // todo
-    // 上位層への振り分けをProtocolで行う
-    _ = out;
-    _ = table;
+    // 上位層への振り分けを Protocol で行う
+    switch (packet.protocol) {
+        .icmp => try handleIcmp(stdout, packet.payload),
+        else => {},
+    }
 
     return null;
+}
+
+/// 振り分けられた ICMP メッセージを処理する
+fn handleIcmp(stdout: *Io.Writer, payload: []const u8) !void {
+    const icmp = tcpipz.icmp;
+
+    const message = icmp.parse(payload) catch |err| {
+        try stdout.print("dropped ({s})\n", .{@errorName(err)});
+        return;
+    };
+
+    switch (message.type) {
+        // 名前の無い値を先に吸う。@tagName に渡すと未知の値で落ちる
+        _ => try stdout.print("icmp type={d} code={d}\n", .{
+            @intFromEnum(message.type),
+            message.code,
+        }),
+        else => try stdout.print("icmp {s} id={d} seq={d} data={d}B\n", .{
+            @tagName(message.type),
+            message.id,
+            message.seq,
+            message.payload.len,
+        }),
+    }
 }
