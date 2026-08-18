@@ -169,39 +169,31 @@ pub fn build(buf: []u8, dst: Addr, protocol: Protocol, payload: []const u8) Buil
     return buf[0..total_len];
 }
 
-/// 送信要求 1 件の結末
-pub const Outcome = enum {
-    /// 宛先 MAC が分かったので、IPv4 パケットを載せたフレームができた。
-    sent,
-    /// 宛先 MAC が未解決なので、代わりに ARP 要求ができた。payload は捨てている。
-    resolving,
-};
-
-/// `dst` 宛に `payload` を送るフレームを組み立てる。**外に出る経路はここ 1 本**。
-pub fn send(
+/// フレームを組み立てる、外に出る経路はここ 1 本
+pub fn output(
     buf: []u8,
     table: *const arp.Table,
     dst: Addr,
     protocol: Protocol,
     payload: []const u8,
-) !struct { Outcome, []u8 } {
+) ![]u8 {
     const dst_mac = table.lookup(dst) orelse {
         var arp_buf: [arp.packet_len]u8 = undefined;
-        return .{ .resolving, try ethernet.build(buf, .{
+        return ethernet.build(buf, .{
             .dst = ethernet.broadcast,
             .src = ethernet.our_mac,
             .ethertype = .arp,
             .payload = try arp.build(&arp_buf, arp.requestFor(dst)),
-        }) };
+        });
     };
 
     var packet_buf: [ethernet.mtu]u8 = undefined;
-    return .{ .sent, try ethernet.build(buf, .{
+    return ethernet.build(buf, .{
         .dst = dst_mac,
         .src = ethernet.our_mac,
         .ethertype = .ip4,
         .payload = try build(&packet_buf, dst, protocol, payload),
-    }) };
+    });
 }
 
 pub fn formatAddr(writer: *std.Io.Writer, addr: Addr) std.Io.Writer.Error!void {
@@ -407,8 +399,7 @@ test "解決済みの IP は即フレームになる" {
     table.put(kernel_addr, kernel_mac);
 
     var buf: [ethernet.max_frame_len]u8 = undefined;
-    const outcome, const bytes = try send(&buf, &table, kernel_addr, .icmp, "hello");
-    try std.testing.expectEqual(Outcome.sent, outcome);
+    const bytes = try output(&buf, &table, kernel_addr, .icmp, "hello");
 
     const frame = try ethernet.parse(bytes);
     try std.testing.expectEqual(kernel_mac, frame.dst); // ブロードキャストではない
@@ -422,9 +413,8 @@ test "未解決の IP は ARP 要求になり、payload は捨てられる" {
     var table: arp.Table = .{};
 
     var buf: [ethernet.max_frame_len]u8 = undefined;
-    const outcome, const bytes = try send(&buf, &table, kernel_addr, .icmp, "hello");
     // できたのは ARP 要求。payload を載せたフレームは出ていない
-    try std.testing.expectEqual(Outcome.resolving, outcome);
+    const bytes = try output(&buf, &table, kernel_addr, .icmp, "hello");
 
     const frame = try ethernet.parse(bytes);
     try std.testing.expectEqual(ethernet.broadcast, frame.dst);
@@ -440,16 +430,14 @@ test "応答を学習すれば次は送れる" {
     var buf: [ethernet.max_frame_len]u8 = undefined;
 
     {
-        const outcome, const bytes = try send(&buf, &table, kernel_addr, .icmp, "hi");
-        try std.testing.expectEqual(Outcome.resolving, outcome);
+        const bytes = try output(&buf, &table, kernel_addr, .icmp, "hi");
         try std.testing.expectEqual(ethernet.EtherType.arp, (try ethernet.parse(bytes)).ethertype);
     }
 
     table.put(kernel_addr, kernel_mac); // ARP 応答を受け取ったとして学習
 
     {
-        const outcome, const bytes = try send(&buf, &table, kernel_addr, .icmp, "hi");
-        try std.testing.expectEqual(Outcome.sent, outcome);
+        const bytes = try output(&buf, &table, kernel_addr, .icmp, "hi");
         try std.testing.expectEqual(ethernet.EtherType.ip4, (try ethernet.parse(bytes)).ethertype);
     }
 }

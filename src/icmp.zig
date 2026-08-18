@@ -85,6 +85,45 @@ pub fn parse(bytes: []const u8) ParseError!Message {
     };
 }
 
+pub const BuildError = error{BufferTooSmall};
+
+/// ICMP メッセージをバイト列に組み立てる
+///
+/// `Message.checksum` は無視して計算し直す。受信したものを組み立て直す以上、
+/// 元の値には意味が無い — 中身を 1 ビットでも変えれば別の値になる。
+pub fn build(buf: []u8, message: Message) BuildError![]u8 {
+    const total_len = header_len + message.payload.len;
+    if (buf.len < total_len) return error.BufferTooSmall;
+
+    buf[0] = @intFromEnum(message.type);
+    buf[1] = message.code;
+    hexdump.writeU16(buf[2..4], 0); // チェックサムは 0 埋めしてから計算する
+    hexdump.writeU16(buf[4..6], message.id);
+    hexdump.writeU16(buf[6..8], message.seq);
+    @memcpy(buf[header_len..total_len], message.payload);
+
+    // data を書き終えてから全体を計算する。IPv4 と違い対象はメッセージ全体
+    hexdump.writeU16(buf[2..4], checksum.compute(buf[0..total_len]));
+
+    return buf[0..total_len];
+}
+
+/// Echo Request に対する Echo Reply を作る。
+///
+/// 変えるのはタイプだけ。id / seq / data をそのまま返すのは RFC 792 の要求で、
+/// 送信側はこれを頼りに「自分が投げたどの 1 発への応答か」を判定し、
+/// data に埋めておいた送信時刻との差から RTT を出す。
+pub fn replyTo(request: Message) Message {
+    return .{
+        .type = .echo_reply,
+        .code = 0,
+        .checksum = 0, // build が計算し直す
+        .id = request.id,
+        .seq = request.seq,
+        .payload = request.payload,
+    };
+}
+
 // tcpdump -i tap0 -xx -c1 icmp で採取した `ping -c2 192.168.70.2` の 1 発目から、
 // ICMP 部分の 64 バイト（IPv4 ヘッダ 20 バイトを除いたもの）。
 const sample_echo_request = [_]u8{
@@ -159,4 +198,69 @@ test "未知のタイプも値を保持できる" {
 
     const message = try parse(&bytes);
     try std.testing.expectEqual(@as(u8, 3), @intFromEnum(message.type));
+}
+
+test "Echo Request から Echo Reply を組み立てる" {
+    const request = try parse(&sample_echo_request);
+
+    var buf: [64]u8 = undefined;
+    const bytes = try build(&buf, replyTo(request));
+
+    // 長さは変わらない。data をそのまま返すので
+    try std.testing.expectEqual(sample_echo_request.len, bytes.len);
+
+    const reply = try parse(bytes); // parse を通る = チェックサムが正しい
+    try std.testing.expectEqual(Type.echo_reply, reply.type);
+    try std.testing.expectEqual(@as(u8, 0), reply.code);
+    try std.testing.expectEqual(request.id, reply.id);
+    try std.testing.expectEqual(request.seq, reply.seq);
+    try std.testing.expectEqualSlices(u8, request.payload, reply.payload);
+}
+
+test "タイプ以外のバイトは 1 つも変わらない" {
+    const request = try parse(&sample_echo_request);
+
+    var buf: [64]u8 = undefined;
+    const bytes = try build(&buf, replyTo(request));
+
+    // 違うのはタイプ (0 バイト目) とチェックサム (2〜3 バイト目) だけ
+    try std.testing.expectEqual(@as(u8, 0), bytes[0]);
+    try std.testing.expectEqualSlices(u8, sample_echo_request[4..], bytes[4..]);
+
+    // タイプが 8 → 0 に減った分、チェックサムは 0x0800 増える。
+    // 1 の補数和の一部を減らせば、その補数は同じだけ増えるため
+    const before = hexdump.readU16(sample_echo_request[2..4]);
+    const after = hexdump.readU16(bytes[2..4]);
+    try std.testing.expectEqual(before + 0x0800, after);
+}
+
+test "build した結果を parse で戻せる" {
+    var buf: [16]u8 = undefined;
+    const original: Message = .{
+        .type = .echo_reply,
+        .code = 0,
+        .checksum = 0,
+        .id = 0x1234,
+        .seq = 7,
+        .payload = "hello",
+    };
+    const parsed = try parse(try build(&buf, original));
+
+    try std.testing.expectEqual(original.type, parsed.type);
+    try std.testing.expectEqual(original.id, parsed.id);
+    try std.testing.expectEqual(original.seq, parsed.seq);
+    try std.testing.expectEqualStrings(original.payload, parsed.payload);
+}
+
+test "バッファが足りなければエラー" {
+    // ヘッダ 8 + data 5 = 13 バイト必要
+    var buf: [12]u8 = undefined;
+    try std.testing.expectError(error.BufferTooSmall, build(&buf, .{
+        .type = .echo_reply,
+        .code = 0,
+        .checksum = 0,
+        .id = 1,
+        .seq = 1,
+        .payload = "hello",
+    }));
 }

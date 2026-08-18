@@ -27,10 +27,8 @@ pub fn main(init: std.process.Init) !void {
     var tx_buf: [tcpipz.ethernet.max_frame_len]u8 = undefined;
 
     // 起動時に一度、まだ何も知らない状態で送信経路を叩いてみる。
-    // テーブルが空なので .resolving が返り、ARP 要求だけが出る
-    const probe, const probe_frame = try tcpipz.ip.send(&tx_buf, &table, kernel_ip, .icmp, "");
-    try tap.write(io, probe_frame);
-    try stdout.print("startup probe: {s}\n", .{@tagName(probe)});
+    // テーブルが空なので ARP 要求だけが出る
+    try tap.write(io, try tcpipz.ip.output(&tx_buf, &table, kernel_ip, .icmp, ""));
 
     try stdout.print("Waiting for frames...\n\n", .{});
     try stdout.flush();
@@ -60,7 +58,7 @@ fn handleFrame(
         return null;
     };
 
-    // 上位層への振り分けをEtherTypeで行う
+    // 上位層への振り分けを EtherType で行う
     switch (frame.ethertype) {
         .arp => {
             try stdout.print("frame received : ethertype = arp\n", .{});
@@ -68,7 +66,7 @@ fn handleFrame(
         },
         .ip4 => {
             try stdout.print("frame received : ethertype = ipv4\n", .{});
-            return try handleIp4(stdout, frame.payload);
+            return try handleIp4(out, stdout, table, frame.payload);
         },
         .ip6 => return null,
         else => return null,
@@ -108,7 +106,9 @@ fn handleArp(
 
 /// 振り分けられた IPv4 パケットを処理する
 fn handleIp4(
+    out: []u8,
     stdout: *Io.Writer,
+    table: *const tcpipz.arp.Table,
     payload: []const u8,
 ) !?[]const u8 {
     const ip = tcpipz.ip;
@@ -123,34 +123,37 @@ fn handleIp4(
     }
 
     // 上位層への振り分けを Protocol で行う
-    switch (packet.protocol) {
-        .icmp => try handleIcmp(stdout, packet.payload),
-        else => {},
-    }
-
-    return null;
+    return switch (packet.protocol) {
+        .icmp => try handleIcmp(out, stdout, table, packet),
+        else => null,
+    };
 }
 
-/// 振り分けられた ICMP メッセージを処理する
-fn handleIcmp(stdout: *Io.Writer, payload: []const u8) !void {
+/// 振り分けられた ICMP メッセージを処理し、Echo Request には Echo Reply を返す
+fn handleIcmp(
+    out: []u8,
+    stdout: *Io.Writer,
+    table: *const tcpipz.arp.Table,
+    packet: tcpipz.ip.Packet,
+) !?[]const u8 {
+    const ip = tcpipz.ip;
     const icmp = tcpipz.icmp;
 
-    const message = icmp.parse(payload) catch |err| {
+    const message = icmp.parse(packet.payload) catch |err| {
         try stdout.print("dropped ({s})\n", .{@errorName(err)});
-        return;
+        return null;
     };
 
-    switch (message.type) {
-        // 名前の無い値を先に吸う。@tagName に渡すと未知の値で落ちる
-        _ => try stdout.print("icmp type={d} code={d}\n", .{
-            @intFromEnum(message.type),
-            message.code,
-        }),
-        else => try stdout.print("icmp {s} id={d} seq={d} data={d}B\n", .{
-            @tagName(message.type),
-            message.id,
-            message.seq,
-            message.payload.len,
-        }),
-    }
+    // 答えるのは Echo Request だけ。Echo Reply に答えると往復が止まらなくなる
+    if (message.type != .echo_request) return null;
+
+    // 宛先は要求の送信元。行きと帰りで src / dst が入れ替わる
+    var icmp_buf: [tcpipz.ethernet.mtu - ip.header_len_min]u8 = undefined;
+    return try ip.output(
+        out,
+        table,
+        packet.src,
+        .icmp,
+        try icmp.build(&icmp_buf, icmp.replyTo(message)),
+    );
 }
