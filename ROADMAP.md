@@ -13,7 +13,7 @@ TCP/IP を理解することを目的とした、スモールステップの実�
 - [x] Step 7: ARP 応答を返す 🏁
 - [x] Step 8: ARP テーブルと ARP 要求
 - [x] Step 9: IPv4 ヘッダのパース + チェックサム検証
-- [ ] Step 10: IPv4 ヘッダの組み立てと送信
+- [x] Step 10: IPv4 ヘッダの組み立てと送信
 - [ ] Step 11: ICMP Echo のパース
 - [ ] Step 12: Echo Reply を返す 🏁
 - [ ] Step 13: UDP ヘッダと疑似ヘッダチェックサム

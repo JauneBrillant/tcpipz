@@ -42,15 +42,12 @@
 const std = @import("std");
 const hexdump = @import("hexdump.zig");
 const checksum = @import("checksum.zig");
+const ethernet = @import("ethernet.zig");
+const arp = @import("arp.zig");
 
-/// オプション無しのヘッダ長。IHL の最小値 5 ワードに対応する。
 pub const header_len_min = 20;
-
+pub const default_ttl = 64;
 pub const Addr = [4]u8;
-
-/// このスタック自身の IP アドレス。
-/// カーネルはこの IP の存在を知らない — ARP 応答を返して初めて認識される。
-/// 本来 IP はインターフェース（NIC, TAP, Lo など）に付与される。
 pub const our_addr: Addr = .{ 192, 168, 70, 2 };
 
 /// ペイロードをどの上位層に渡すか。EtherType がフレームに対して果たす役割を、
@@ -145,12 +142,72 @@ pub fn isForUs(packet: Packet) bool {
     return std.mem.eql(u8, &packet.dst, &our_addr);
 }
 
+pub const BuildError = error{ BufferTooSmall, PayloadTooLarge };
+
+/// IPv4 パケットをバイト列に組み立てる
+pub fn build(buf: []u8, dst: Addr, protocol: Protocol, payload: []const u8) BuildError![]u8 {
+    const total_len = header_len_min + payload.len;
+    if (total_len > ethernet.mtu) return error.PayloadTooLarge;
+    if (buf.len < total_len) return error.BufferTooSmall;
+
+    buf[0] = 0x45; // バージョン 4、IHL 5 ワード = 20 バイト
+    buf[1] = 0; // DSCP / ECN — 経路上でほぼ無視されるので 0
+    hexdump.writeU16(buf[2..4], @intCast(total_len));
+    hexdump.writeU16(buf[4..6], 0); // 識別子
+    hexdump.writeU16(buf[6..8], 0x4000); // DF を立てる、フラグメントオフセット 0
+    buf[8] = default_ttl;
+    buf[9] = @intFromEnum(protocol);
+    hexdump.writeU16(buf[10..12], 0); // チェックサムは 0 埋めしてから計算する
+    @memcpy(buf[12..16], &our_addr);
+    @memcpy(buf[16..20], &dst);
+
+    // 全フィールドを書き終えてから計算する。0 のまま計算した結果を書き戻すと、
+    // 「フィールドを含めたまま全体を計算すると 0 になる」性質が成立する
+    hexdump.writeU16(buf[10..12], checksum.compute(buf[0..header_len_min]));
+
+    @memcpy(buf[header_len_min..total_len], payload);
+    return buf[0..total_len];
+}
+
+/// 送信要求 1 件の結末
+pub const Outcome = enum {
+    /// 宛先 MAC が分かったので、IPv4 パケットを載せたフレームができた。
+    sent,
+    /// 宛先 MAC が未解決なので、代わりに ARP 要求ができた。payload は捨てている。
+    resolving,
+};
+
+/// `dst` 宛に `payload` を送るフレームを組み立てる。**外に出る経路はここ 1 本**。
+pub fn send(
+    buf: []u8,
+    table: *const arp.Table,
+    dst: Addr,
+    protocol: Protocol,
+    payload: []const u8,
+) !struct { Outcome, []u8 } {
+    const dst_mac = table.lookup(dst) orelse {
+        var arp_buf: [arp.packet_len]u8 = undefined;
+        return .{ .resolving, try ethernet.build(buf, .{
+            .dst = ethernet.broadcast,
+            .src = ethernet.our_mac,
+            .ethertype = .arp,
+            .payload = try arp.build(&arp_buf, arp.requestFor(dst)),
+        }) };
+    };
+
+    var packet_buf: [ethernet.mtu]u8 = undefined;
+    return .{ .sent, try ethernet.build(buf, .{
+        .dst = dst_mac,
+        .src = ethernet.our_mac,
+        .ethertype = .ip4,
+        .payload = try build(&packet_buf, dst, protocol, payload),
+    }) };
+}
+
 pub fn formatAddr(writer: *std.Io.Writer, addr: Addr) std.Io.Writer.Error!void {
     try writer.print("{d}.{d}.{d}.{d}", .{ addr[0], addr[1], addr[2], addr[3] });
 }
 
-// tcpdump -i tap0 -xx -c1 icmp で採取した、カーネルからの ping (Ethernet ヘッダを除く 84 バイト)。
-// 元は `ping -c2 192.168.70.2` の 1 発目。
 const sample_echo_request = [_]u8{
     // --- IPv4 ヘッダ 20 バイト ---
     0x45, // バージョン 4、IHL 5 ワード = 20 バイト
@@ -300,6 +357,101 @@ test "宛先が自分かどうかの判断はパースと分かれている" {
     // パース自体は成功する。正しいパケットではあるので
     const other = try parse(&bytes);
     try std.testing.expect(!isForUs(other));
+}
+
+test "組み立てたヘッダは自分でパースし直せる" {
+    var buf: [64]u8 = undefined;
+    const bytes = try build(&buf, .{ 192, 168, 70, 1 }, .icmp, "hello");
+
+    try std.testing.expectEqual(@as(usize, 25), bytes.len); // ヘッダ 20 + 5
+
+    const packet = try parse(bytes);
+    try std.testing.expectEqual(@as(u8, 20), packet.header_len);
+    try std.testing.expectEqual(@as(u16, 25), packet.total_len);
+    try std.testing.expectEqual(Protocol.icmp, packet.protocol);
+    try std.testing.expectEqual(our_addr, packet.src);
+    try std.testing.expectEqual(Addr{ 192, 168, 70, 1 }, packet.dst);
+    try std.testing.expectEqual(@as(u8, default_ttl), packet.ttl);
+    try std.testing.expectEqualStrings("hello", packet.payload);
+
+    // 分割しないので DF を立て、識別子は使わない (RFC 6864)
+    try std.testing.expect(packet.dont_fragment);
+    try std.testing.expect(!packet.more_fragments);
+    try std.testing.expectEqual(@as(u16, 0), packet.id);
+}
+
+test "組み立てたヘッダのチェックサムは検証を通る" {
+    var buf: [64]u8 = undefined;
+    const bytes = try build(&buf, .{ 192, 168, 70, 1 }, .icmp, "hello");
+    // tcpdump -vv が bad cksum を出さない条件そのもの
+    try std.testing.expect(checksum.verify(bytes[0..20]));
+}
+
+test "MTU を超えるペイロードは組み立てられない" {
+    var buf: [2048]u8 = undefined;
+    const ok: [ethernet.mtu - header_len_min]u8 = @splat(0); // ちょうど収まる
+    _ = try build(&buf, .{ 192, 168, 70, 1 }, .icmp, &ok);
+
+    const too_big: [ethernet.mtu - header_len_min + 1]u8 = @splat(0);
+    try std.testing.expectError(
+        error.PayloadTooLarge,
+        build(&buf, .{ 192, 168, 70, 1 }, .icmp, &too_big),
+    );
+}
+
+const kernel_addr: Addr = .{ 192, 168, 70, 1 };
+const kernel_mac: ethernet.Mac = .{ 0xce, 0xbd, 0x84, 0x58, 0x71, 0x32 };
+
+test "解決済みの IP は即フレームになる" {
+    var table: arp.Table = .{};
+    table.put(kernel_addr, kernel_mac);
+
+    var buf: [ethernet.max_frame_len]u8 = undefined;
+    const outcome, const bytes = try send(&buf, &table, kernel_addr, .icmp, "hello");
+    try std.testing.expectEqual(Outcome.sent, outcome);
+
+    const frame = try ethernet.parse(bytes);
+    try std.testing.expectEqual(kernel_mac, frame.dst); // ブロードキャストではない
+    try std.testing.expectEqual(ethernet.EtherType.ip4, frame.ethertype);
+
+    const packet = try parse(frame.payload);
+    try std.testing.expectEqualStrings("hello", packet.payload);
+}
+
+test "未解決の IP は ARP 要求になり、payload は捨てられる" {
+    var table: arp.Table = .{};
+
+    var buf: [ethernet.max_frame_len]u8 = undefined;
+    const outcome, const bytes = try send(&buf, &table, kernel_addr, .icmp, "hello");
+    // できたのは ARP 要求。payload を載せたフレームは出ていない
+    try std.testing.expectEqual(Outcome.resolving, outcome);
+
+    const frame = try ethernet.parse(bytes);
+    try std.testing.expectEqual(ethernet.broadcast, frame.dst);
+    try std.testing.expectEqual(ethernet.EtherType.arp, frame.ethertype);
+
+    const request = try arp.parse(frame.payload);
+    try std.testing.expectEqual(arp.Oper.request, request.oper);
+    try std.testing.expectEqual(kernel_addr, request.target_ip);
+}
+
+test "応答を学習すれば次は送れる" {
+    var table: arp.Table = .{};
+    var buf: [ethernet.max_frame_len]u8 = undefined;
+
+    {
+        const outcome, const bytes = try send(&buf, &table, kernel_addr, .icmp, "hi");
+        try std.testing.expectEqual(Outcome.resolving, outcome);
+        try std.testing.expectEqual(ethernet.EtherType.arp, (try ethernet.parse(bytes)).ethertype);
+    }
+
+    table.put(kernel_addr, kernel_mac); // ARP 応答を受け取ったとして学習
+
+    {
+        const outcome, const bytes = try send(&buf, &table, kernel_addr, .icmp, "hi");
+        try std.testing.expectEqual(Outcome.sent, outcome);
+        try std.testing.expectEqual(ethernet.EtherType.ip4, (try ethernet.parse(bytes)).ethertype);
+    }
 }
 
 test "formatAddr" {

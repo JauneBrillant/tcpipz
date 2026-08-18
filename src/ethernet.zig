@@ -15,11 +15,11 @@ const std = @import("std");
 const hexdump = @import("hexdump.zig");
 
 pub const header_len = 14;
+pub const mtu = 1500;
+pub const max_frame_len = header_len + mtu;
+
 pub const Mac = [6]u8;
 pub const broadcast: Mac = @splat(0xff);
-/// このスタック自身の MAC アドレス。
-/// 先頭の `0x02` は bit0 (I/G) = 0: ユニキャスト、bit1 (U/L) = 1: ローカル管理。
-/// ローカル管理を宣言しているので、勝手に決めた値でも実在の NIC と衝突しない。
 pub const our_mac: Mac = .{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x02 };
 
 /// EtherType が「ペイロードをどの上位層に渡すか」を決める
