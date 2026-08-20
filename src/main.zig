@@ -125,6 +125,7 @@ fn handleIp4(
     // 上位層への振り分けを Protocol で行う
     return switch (packet.protocol) {
         .icmp => try handleIcmp(out, stdout, table, packet),
+        .udp => try handleUdp(stdout, packet),
         else => null,
     };
 }
@@ -156,4 +157,22 @@ fn handleIcmp(
         .icmp,
         try icmp.build(&icmp_buf, icmp.replyTo(message)),
     );
+}
+
+/// 振り分けられた UDP データグラムを表示する。応答は Step 14 で
+fn handleUdp(stdout: *Io.Writer, packet: tcpipz.ip.Packet) !?[]const u8 {
+    const udp = tcpipz.udp;
+
+    const datagram = udp.parse(packet.payload, packet.src, packet.dst) catch |err| {
+        try stdout.print("dropped ({s})\n", .{@errorName(err)});
+        return null;
+    };
+
+    try stdout.print("udp {d} -> {d} {d}B: \"{s}\"\n", .{
+        datagram.src_port,
+        datagram.dst_port,
+        datagram.payload.len,
+        datagram.payload,
+    });
+    return null;
 }

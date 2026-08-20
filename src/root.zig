@@ -7,6 +7,7 @@ pub const ethernet = @import("ethernet.zig");
 pub const arp = @import("arp.zig");
 pub const ip = @import("ip.zig");
 pub const icmp = @import("icmp.zig");
+pub const udp = @import("udp.zig");
 pub const Tap = @import("Tap.zig");
 
 test {
@@ -19,4 +20,5 @@ test {
     _ = arp;
     _ = ip;
     _ = icmp;
+    _ = udp;
 }
