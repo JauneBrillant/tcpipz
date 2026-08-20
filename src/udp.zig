@@ -75,6 +75,39 @@ pub fn parse(bytes: []const u8, src: ip.Addr, dst: ip.Addr) ParseError!Datagram 
     };
 }
 
+pub const BuildError = error{ BufferTooSmall, PayloadTooLarge };
+
+/// UDP データグラムをバイト列に組み立てる
+pub fn build(
+    buf: []u8,
+    dst: ip.Addr,
+    src_port: u16,
+    dst_port: u16,
+    payload: []const u8,
+) BuildError![]u8 {
+    const total_len = header_len + payload.len;
+    if (total_len > std.math.maxInt(u16)) return error.PayloadTooLarge;
+    if (buf.len < total_len) return error.BufferTooSmall;
+
+    hexdump.writeU16(buf[0..2], src_port);
+    hexdump.writeU16(buf[2..4], dst_port);
+    hexdump.writeU16(buf[4..6], @intCast(total_len));
+    hexdump.writeU16(buf[6..8], 0); // チェックサムは 0 埋めしてから計算する
+    @memcpy(buf[header_len..total_len], payload);
+
+    const sum = checksum.computeWithPseudo(
+        pseudoFor(ip.our_addr, dst, @intCast(total_len)),
+        buf[0..total_len],
+    );
+
+    // 計算結果が 0 になったら 0xffff を送る。0 は「未計算」の意味に予約されているため。
+    // 1 の補数では -0 (0xffff) と +0 (0x0000) がどちらもゼロなので、
+    // 受信側がどちらで検証しても結果は変わらない
+    hexdump.writeU16(buf[6..8], if (sum == 0) 0xffff else sum);
+
+    return buf[0..total_len];
+}
+
 /// この UDP データグラム用の疑似ヘッダ。プロトコル番号は 17 で固定
 fn pseudoFor(src: ip.Addr, dst: ip.Addr, length: u16) [checksum.pseudo_header_len]u8 {
     return checksum.pseudoHeader(src, dst, @intFromEnum(ip.Protocol.udp), length);
@@ -181,4 +214,46 @@ test "申告より長い入力は length で切られる" {
 
     const datagram = try parse(&bytes, sample_src, sample_dst);
     try std.testing.expectEqualStrings("hello", datagram.payload);
+}
+
+test "組み立てたものをパースで戻せる" {
+    var buf: [32]u8 = undefined;
+    const bytes = try build(&buf, sample_src, 7, 42633, "hello");
+
+    // 送信側は our_addr。受信側から見た src / dst はこの向きになる
+    const datagram = try parse(bytes, ip.our_addr, sample_src);
+    try std.testing.expectEqual(@as(u16, 7), datagram.src_port);
+    try std.testing.expectEqual(@as(u16, 42633), datagram.dst_port);
+    try std.testing.expectEqual(@as(u16, 13), datagram.length);
+    try std.testing.expectEqualStrings("hello", datagram.payload);
+}
+
+test "エコー応答ではポートが入れ替わる" {
+    const request = try parse(&sample_datagram, sample_src, sample_dst);
+
+    var buf: [32]u8 = undefined;
+    const bytes = try build(&buf, sample_src, request.dst_port, request.src_port, request.payload);
+    const reply = try parse(bytes, ip.our_addr, sample_src);
+
+    // 行きの宛先が帰りの送信元になる。IP アドレスと同じ入れ替えがポートでも起きる
+    try std.testing.expectEqual(request.dst_port, reply.src_port);
+    try std.testing.expectEqual(request.src_port, reply.dst_port);
+    try std.testing.expectEqualStrings(request.payload, reply.payload);
+}
+
+test "チェックサムが 0 になる場合は 0xffff を送る" {
+    // 総当たりで見つけた、計算結果がちょうど 0 になる組み合わせ
+    var buf: [16]u8 = undefined;
+    const bytes = try build(&buf, sample_src, 7, 1024, &.{ 0xee, 0x7e });
+
+    try std.testing.expectEqual(@as(u16, 0xffff), hexdump.readU16(bytes[6..8]));
+
+    // 0xffff でも検証は通る。1 の補数和では 0xffff を足すことがゼロを足すことに等しい
+    _ = try parse(bytes, ip.our_addr, sample_src);
+}
+
+test "バッファが足りなければエラー" {
+    // ヘッダ 8 + data 5 = 13 バイト必要
+    var buf: [12]u8 = undefined;
+    try std.testing.expectError(error.BufferTooSmall, build(&buf, sample_src, 7, 7, "hello"));
 }

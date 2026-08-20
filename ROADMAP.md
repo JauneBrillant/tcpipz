@@ -17,7 +17,7 @@ TCP/IP を理解することを目的とした、スモールステップの実�
 - [x] Step 11: ICMP Echo のパース
 - [x] Step 12: Echo Reply を返す 🏁
 - [x] Step 13: UDP ヘッダと疑似ヘッダチェックサム
-- [ ] Step 14: UDP echo サーバ 🏁
+- [x] Step 14: UDP echo サーバ 🏁
 - [ ] Step 15: ポート多重化（ソケットテーブル）
 - [ ] Step 16: TCP ヘッダのパース
 - [ ] Step 17: RST 応答（CLOSED の振る舞い）

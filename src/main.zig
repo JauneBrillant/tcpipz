@@ -35,8 +35,8 @@ pub fn main(init: std.process.Init) !void {
 
     var rx_buf: [2048]u8 = undefined;
     while (true) {
-        const bytes = try tap.read(io, &rx_buf); // ブロッキング呼び出し
-        if (try handleFrame(&tx_buf, stdout, &table, bytes)) |frame| try tap.write(io, frame);
+        const rx_frame = try tap.read(io, &rx_buf); // ブロッキング呼び出し
+        if (try handleFrame(&tx_buf, stdout, &table, rx_frame)) |tx_frame| try tap.write(io, tx_frame);
         try stdout.flush();
     }
 }
@@ -46,27 +46,27 @@ const kernel_ip: tcpipz.arp.Ip4 = .{ 192, 168, 70, 1 };
 
 /// 受信したフレームを 1 つ処理する。
 fn handleFrame(
-    out: []u8,
+    tx_buf: []u8,
     stdout: *Io.Writer,
     table: *tcpipz.arp.Table,
-    bytes: []const u8,
+    rx_frame: []const u8,
 ) !?[]const u8 {
     const ethernet = tcpipz.ethernet;
 
-    const frame = ethernet.parse(bytes) catch |err| {
-        try stdout.print("\n--- {d} bytes: dropped ({s}) ---\n", .{ bytes.len, @errorName(err) });
+    const frame = ethernet.parse(rx_frame) catch |err| {
+        try stdout.print("\n--- {d} bytes: dropped ({s}) ---\n", .{ rx_frame.len, @errorName(err) });
         return null;
     };
 
     // 上位層への振り分けを EtherType で行う
     switch (frame.ethertype) {
         .arp => {
-            try stdout.print("frame received : ethertype = arp\n", .{});
-            return try handleArp(out, stdout, table, frame.payload);
+            // try stdout.print("frame received : ethertype = arp\n", .{});
+            return try handleArp(tx_buf, stdout, table, frame.payload);
         },
         .ip4 => {
-            try stdout.print("frame received : ethertype = ipv4\n", .{});
-            return try handleIp4(out, stdout, table, frame.payload);
+            // try stdout.print("frame received : ethertype = ipv4\n", .{});
+            return try handleIp4(tx_buf, stdout, table, frame.payload);
         },
         .ip6 => return null,
         else => return null,
@@ -75,7 +75,7 @@ fn handleFrame(
 
 /// 振り分けられた Arp パケットを処理する
 fn handleArp(
-    out: []u8,
+    tx_buf: []u8,
     stdout: *Io.Writer,
     table: *tcpipz.arp.Table,
     payload: []const u8,
@@ -94,7 +94,7 @@ fn handleArp(
     if (!std.mem.eql(u8, &packet.target_ip, &arp.our_ip)) return null;
 
     var arp_buf: [arp.packet_len]u8 = undefined;
-    const reply = try ethernet.build(out, .{
+    const reply = try ethernet.build(tx_buf, .{
         .dst = packet.sender_mac,
         .src = ethernet.our_mac,
         .ethertype = .arp,
@@ -106,7 +106,7 @@ fn handleArp(
 
 /// 振り分けられた IPv4 パケットを処理する
 fn handleIp4(
-    out: []u8,
+    tx_buf: []u8,
     stdout: *Io.Writer,
     table: *const tcpipz.arp.Table,
     payload: []const u8,
@@ -124,15 +124,15 @@ fn handleIp4(
 
     // 上位層への振り分けを Protocol で行う
     return switch (packet.protocol) {
-        .icmp => try handleIcmp(out, stdout, table, packet),
-        .udp => try handleUdp(stdout, packet),
+        .icmp => try handleIcmp(tx_buf, stdout, table, packet),
+        .udp => try handleUdp(tx_buf, stdout, table, packet),
         else => null,
     };
 }
 
 /// 振り分けられた ICMP メッセージを処理し、Echo Request には Echo Reply を返す
 fn handleIcmp(
-    out: []u8,
+    tx_buf: []u8,
     stdout: *Io.Writer,
     table: *const tcpipz.arp.Table,
     packet: tcpipz.ip.Packet,
@@ -151,7 +151,7 @@ fn handleIcmp(
     // 宛先は要求の送信元。行きと帰りで src / dst が入れ替わる
     var icmp_buf: [tcpipz.ethernet.mtu - ip.header_len_min]u8 = undefined;
     return try ip.output(
-        out,
+        tx_buf,
         table,
         packet.src,
         .icmp,
@@ -159,8 +159,17 @@ fn handleIcmp(
     );
 }
 
-/// 振り分けられた UDP データグラムを表示する。応答は Step 14 で
-fn handleUdp(stdout: *Io.Writer, packet: tcpipz.ip.Packet) !?[]const u8 {
+/// エコーサーバのポート。RFC 862 が well-known ポートとして定めている
+const echo_port = 7;
+
+/// 振り分けられた UDP データグラムを処理し、echo ポート宛ならそのまま返す
+fn handleUdp(
+    tx_buf: []u8,
+    stdout: *Io.Writer,
+    table: *const tcpipz.arp.Table,
+    packet: tcpipz.ip.Packet,
+) !?[]const u8 {
+    const ip = tcpipz.ip;
     const udp = tcpipz.udp;
 
     const datagram = udp.parse(packet.payload, packet.src, packet.dst) catch |err| {
@@ -168,11 +177,14 @@ fn handleUdp(stdout: *Io.Writer, packet: tcpipz.ip.Packet) !?[]const u8 {
         return null;
     };
 
-    try stdout.print("udp {d} -> {d} {d}B: \"{s}\"\n", .{
-        datagram.src_port,
+    if (datagram.dst_port != echo_port) return null;
+
+    var udp_buf: [tcpipz.ethernet.mtu - ip.header_len_min]u8 = undefined;
+    return try ip.output(tx_buf, table, packet.src, .udp, try udp.build(
+        &udp_buf,
+        packet.src,
         datagram.dst_port,
-        datagram.payload.len,
+        datagram.src_port,
         datagram.payload,
-    });
-    return null;
+    ));
 }
