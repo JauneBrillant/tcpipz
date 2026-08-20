@@ -22,21 +22,26 @@ pub fn main(init: std.process.Init) !void {
     defer tap.close(io);
 
     try stdout.print("Opened tap0.\n", .{});
-
-    var table: tcpipz.arp.Table = .{};
-    var tx_buf: [tcpipz.ethernet.max_frame_len]u8 = undefined;
-
-    // 起動時に一度、まだ何も知らない状態で送信経路を叩いてみる。
-    // テーブルが空なので ARP 要求だけが出る
-    try tap.write(io, try tcpipz.ip.output(&tx_buf, &table, kernel_ip, .icmp, ""));
-
     try stdout.print("Waiting for frames...\n\n", .{});
     try stdout.flush();
 
+    var arp_table: tcpipz.arp.Table = .{};
+    var tx_buf: [tcpipz.ethernet.max_frame_len]u8 = undefined;
     var rx_buf: [2048]u8 = undefined;
+
     while (true) {
-        const rx_frame = try tap.read(io, &rx_buf); // ブロッキング呼び出し
-        if (try handleFrame(&tx_buf, stdout, &table, rx_frame)) |tx_frame| try tap.write(io, tx_frame);
+        const rx_frame = try tap.read(io, &rx_buf);
+        const tx_frame = handleFrame(&tx_buf, &arp_table, rx_frame) catch |err| switch (err) {
+            // バッファ不足はこちらの設計ミス。捨てて動き続けると気づけないので落とす
+            error.BufferTooSmall, error.PayloadTooLarge => return err,
+            else => {
+                try stdout.print("--- {d} bytes: dropped ({s}) ---\n", .{ rx_frame.len, @errorName(err) });
+                try stdout.flush();
+                continue;
+            },
+        };
+
+        if (tx_frame) |frame| try tap.write(io, frame);
         try stdout.flush();
     }
 }
@@ -44,106 +49,57 @@ pub fn main(init: std.process.Init) !void {
 /// カーネル側 tap0 の IP。このスタックから見た唯一の通信相手。
 const kernel_ip: tcpipz.arp.Ip4 = .{ 192, 168, 70, 1 };
 
-/// 受信したフレームを 1 つ処理する。
-fn handleFrame(
-    tx_buf: []u8,
-    stdout: *Io.Writer,
-    table: *tcpipz.arp.Table,
-    rx_frame: []const u8,
-) !?[]const u8 {
+/// ! : error   捨てた - パースに失敗した不正なフレーム
+/// ? : null    正常   - ただし返すものは無い（他人宛の ARP, IP パケットを捨てるのもこれ）
+///   : []u8    正常   - 組み立てた応答フレーム。呼び出し側が TAP へ書く
+fn handleFrame(tx_buf: []u8, arp_table: *tcpipz.arp.Table, rx_frame: []const u8) !?[]const u8 {
     const ethernet = tcpipz.ethernet;
 
-    const frame = ethernet.parse(rx_frame) catch |err| {
-        try stdout.print("\n--- {d} bytes: dropped ({s}) ---\n", .{ rx_frame.len, @errorName(err) });
-        return null;
+    const frame = try ethernet.parse(rx_frame);
+    return switch (frame.ethertype) {
+        .arp => try handleArp(tx_buf, arp_table, frame.payload),
+        .ip4 => try handleIp4(tx_buf, arp_table, frame.payload),
+        else => null, // IPv6 と未知の EtherType は黙って無視する
     };
-
-    // 上位層への振り分けを EtherType で行う
-    switch (frame.ethertype) {
-        .arp => {
-            // try stdout.print("frame received : ethertype = arp\n", .{});
-            return try handleArp(tx_buf, stdout, table, frame.payload);
-        },
-        .ip4 => {
-            // try stdout.print("frame received : ethertype = ipv4\n", .{});
-            return try handleIp4(tx_buf, stdout, table, frame.payload);
-        },
-        .ip6 => return null,
-        else => return null,
-    }
 }
 
-/// 振り分けられた Arp パケットを処理する
-fn handleArp(
-    tx_buf: []u8,
-    stdout: *Io.Writer,
-    table: *tcpipz.arp.Table,
-    payload: []const u8,
-) !?[]const u8 {
+fn handleArp(tx_buf: []u8, arp_table: *tcpipz.arp.Table, bytes: []const u8) !?[]const u8 {
     const arp = tcpipz.arp;
     const ethernet = tcpipz.ethernet;
 
-    const packet = arp.parse(payload) catch |err| {
-        try stdout.print("dropped ({s})\n", .{@errorName(err)});
-        return null;
-    };
-
-    table.put(packet.sender_ip, packet.sender_mac);
+    const packet = try arp.parse(bytes);
+    arp_table.put(packet.sender_ip, packet.sender_mac);
 
     if (packet.oper != .request) return null;
     if (!std.mem.eql(u8, &packet.target_ip, &arp.our_ip)) return null;
 
     var arp_buf: [arp.packet_len]u8 = undefined;
-    const reply = try ethernet.build(tx_buf, .{
+    return try ethernet.build(tx_buf, .{
         .dst = packet.sender_mac,
         .src = ethernet.our_mac,
         .ethertype = .arp,
         .payload = try arp.build(&arp_buf, arp.replyTo(packet)),
     });
-
-    return reply;
 }
 
-/// 振り分けられた IPv4 パケットを処理する
-fn handleIp4(
-    tx_buf: []u8,
-    stdout: *Io.Writer,
-    table: *const tcpipz.arp.Table,
-    payload: []const u8,
-) !?[]const u8 {
+fn handleIp4(tx_buf: []u8, arp_table: *const tcpipz.arp.Table, bytes: []const u8) !?[]const u8 {
     const ip = tcpipz.ip;
 
-    const packet = ip.parse(payload) catch |err| {
-        try stdout.print("dropped ({s})\n", .{@errorName(err)});
-        return null;
-    };
-
-    if (!ip.isForUs(packet)) {
-        return null;
-    }
-
-    // 上位層への振り分けを Protocol で行う
+    const packet = try ip.parse(bytes);
+    if (!ip.isForUs(packet)) return null;
     return switch (packet.protocol) {
-        .icmp => try handleIcmp(tx_buf, stdout, table, packet),
-        .udp => try handleUdp(tx_buf, stdout, table, packet),
+        .icmp => try handleIcmp(tx_buf, arp_table, packet),
+        .udp => try handleUdp(tx_buf, arp_table, packet),
         else => null,
     };
 }
 
 /// 振り分けられた ICMP メッセージを処理し、Echo Request には Echo Reply を返す
-fn handleIcmp(
-    tx_buf: []u8,
-    stdout: *Io.Writer,
-    table: *const tcpipz.arp.Table,
-    packet: tcpipz.ip.Packet,
-) !?[]const u8 {
+fn handleIcmp(tx_buf: []u8, arp_table: *const tcpipz.arp.Table, packet: tcpipz.ip.Packet) !?[]const u8 {
     const ip = tcpipz.ip;
     const icmp = tcpipz.icmp;
 
-    const message = icmp.parse(packet.payload) catch |err| {
-        try stdout.print("dropped ({s})\n", .{@errorName(err)});
-        return null;
-    };
+    const message = try icmp.parse(packet.payload);
 
     // 答えるのは Echo Request だけ。Echo Reply に答えると往復が止まらなくなる
     if (message.type != .echo_request) return null;
@@ -152,7 +108,7 @@ fn handleIcmp(
     var icmp_buf: [tcpipz.ethernet.mtu - ip.header_len_min]u8 = undefined;
     return try ip.output(
         tx_buf,
-        table,
+        arp_table,
         packet.src,
         .icmp,
         try icmp.build(&icmp_buf, icmp.replyTo(message)),
@@ -163,28 +119,80 @@ fn handleIcmp(
 const echo_port = 7;
 
 /// 振り分けられた UDP データグラムを処理し、echo ポート宛ならそのまま返す
-fn handleUdp(
-    tx_buf: []u8,
-    stdout: *Io.Writer,
-    table: *const tcpipz.arp.Table,
-    packet: tcpipz.ip.Packet,
-) !?[]const u8 {
+fn handleUdp(tx_buf: []u8, arp_table: *const tcpipz.arp.Table, packet: tcpipz.ip.Packet) !?[]const u8 {
     const ip = tcpipz.ip;
     const udp = tcpipz.udp;
 
-    const datagram = udp.parse(packet.payload, packet.src, packet.dst) catch |err| {
-        try stdout.print("dropped ({s})\n", .{@errorName(err)});
-        return null;
-    };
+    const datagram = try udp.parse(packet.payload, packet.src, packet.dst);
 
     if (datagram.dst_port != echo_port) return null;
 
     var udp_buf: [tcpipz.ethernet.mtu - ip.header_len_min]u8 = undefined;
-    return try ip.output(tx_buf, table, packet.src, .udp, try udp.build(
+    return try ip.output(tx_buf, arp_table, packet.src, .udp, try udp.build(
         &udp_buf,
         packet.src,
         datagram.dst_port,
         datagram.src_port,
         datagram.payload,
     ));
+}
+
+test "自分宛の ARP 要求には応答を返し、送信元を学習する" {
+    const ethernet = tcpipz.ethernet;
+    const arp = tcpipz.arp;
+    const sender_mac: ethernet.Mac = .{ 0xde, 0xda, 0x6c, 0x00, 0x2b, 0x9c };
+    const sender_ip: arp.Ip4 = .{ 192, 168, 70, 1 };
+
+    var arp_buf: [arp.packet_len]u8 = undefined;
+    var rx_buf: [ethernet.max_frame_len]u8 = undefined;
+    const request = try ethernet.build(&rx_buf, .{
+        .dst = ethernet.broadcast,
+        .src = sender_mac,
+        .ethertype = .arp,
+        // requestFor は送信元が自分になるので、対向が尋ねてくる形を直接組む
+        .payload = try arp.build(&arp_buf, .{
+            .oper = .request,
+            .sender_mac = sender_mac,
+            .sender_ip = sender_ip,
+            .target_mac = @splat(0),
+            .target_ip = arp.our_ip,
+        }),
+    });
+
+    var arp_table: arp.Table = .{};
+    var tx_buf: [ethernet.max_frame_len]u8 = undefined;
+    const reply = try arp.parse((try ethernet.parse(
+        (try handleFrame(&tx_buf, &arp_table, request)).?,
+    )).payload);
+
+    try std.testing.expectEqual(arp.Oper.reply, reply.oper);
+    try std.testing.expectEqual(sender_mac, reply.target_mac);
+    try std.testing.expectEqual(sender_mac, arp_table.lookup(sender_ip).?);
+}
+
+test "捨てたフレームは null ではなく error で返る" {
+    var arp_table: tcpipz.arp.Table = .{};
+    var tx_buf: [tcpipz.ethernet.max_frame_len]u8 = undefined;
+
+    // 14 バイトに満たない = Ethernet ヘッダすら無い
+    try std.testing.expectError(
+        error.FrameTooShort,
+        handleFrame(&tx_buf, &arp_table, &.{0x00}),
+    );
+}
+
+test "返すものが無いフレームは null で返る" {
+    const ethernet = tcpipz.ethernet;
+    var arp_table: tcpipz.arp.Table = .{};
+    var tx_buf: [ethernet.max_frame_len]u8 = undefined;
+
+    var rx_buf: [ethernet.max_frame_len]u8 = undefined;
+    const frame = try ethernet.build(&rx_buf, .{
+        .dst = ethernet.our_mac,
+        .src = .{ 0xde, 0xda, 0x6c, 0x00, 0x2b, 0x9c },
+        .ethertype = .ip6, // 扱わないので無視される
+        .payload = "",
+    });
+
+    try std.testing.expectEqual(null, try handleFrame(&tx_buf, &arp_table, frame));
 }
