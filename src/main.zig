@@ -3,6 +3,11 @@ const builtin = @import("builtin");
 const Io = std.Io;
 
 const tcpipz = @import("tcpipz");
+const ethernet = tcpipz.ethernet;
+const arp = tcpipz.arp;
+const ip = tcpipz.ip;
+const icmp = tcpipz.icmp;
+const udp = tcpipz.udp;
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -25,8 +30,8 @@ pub fn main(init: std.process.Init) !void {
     try stdout.print("Waiting for frames...\n\n", .{});
     try stdout.flush();
 
-    var arp_table: tcpipz.arp.Table = .{};
-    var tx_buf: [tcpipz.ethernet.max_frame_len]u8 = undefined;
+    var arp_table: arp.Table = .{};
+    var tx_buf: [ethernet.max_frame_len]u8 = undefined;
     var rx_buf: [2048]u8 = undefined;
 
     while (true) {
@@ -47,14 +52,12 @@ pub fn main(init: std.process.Init) !void {
 }
 
 /// カーネル側 tap0 の IP。このスタックから見た唯一の通信相手。
-const kernel_ip: tcpipz.arp.Ip4 = .{ 192, 168, 70, 1 };
+const kernel_ip: arp.Ip4 = .{ 192, 168, 70, 1 };
 
 /// ! : error   捨てた - パースに失敗した不正なフレーム
 /// ? : null    正常   - ただし返すものは無い（他人宛の ARP, IP パケットを捨てるのもこれ）
 ///   : []u8    正常   - 組み立てた応答フレーム。呼び出し側が TAP へ書く
-fn handleFrame(tx_buf: []u8, arp_table: *tcpipz.arp.Table, rx_frame: []const u8) !?[]const u8 {
-    const ethernet = tcpipz.ethernet;
-
+fn handleFrame(tx_buf: []u8, arp_table: *arp.Table, rx_frame: []const u8) !?[]const u8 {
     const frame = try ethernet.parse(rx_frame);
     return switch (frame.ethertype) {
         .arp => try handleArp(tx_buf, arp_table, frame.payload),
@@ -63,13 +66,15 @@ fn handleFrame(tx_buf: []u8, arp_table: *tcpipz.arp.Table, rx_frame: []const u8)
     };
 }
 
-fn handleArp(tx_buf: []u8, arp_table: *tcpipz.arp.Table, bytes: []const u8) !?[]const u8 {
-    const arp = tcpipz.arp;
-    const ethernet = tcpipz.ethernet;
-
+fn handleArp(tx_buf: []u8, arp_table: *arp.Table, bytes: []const u8) !?[]const u8 {
     const packet = try arp.parse(bytes);
+
+    // オペコードを見る前に学習する
+    // 要求も応答も送信元の対応を運んでいるので、両方が学習の機会になる
     arp_table.put(packet.sender_ip, packet.sender_mac);
 
+    // 応答（reply）はここで終わり — 学習が目的で、返すものは無い
+    // 未知のオペコード（RARP など）にも答えない
     if (packet.oper != .request) return null;
     if (!std.mem.eql(u8, &packet.target_ip, &arp.our_ip)) return null;
 
@@ -82,9 +87,7 @@ fn handleArp(tx_buf: []u8, arp_table: *tcpipz.arp.Table, bytes: []const u8) !?[]
     });
 }
 
-fn handleIp4(tx_buf: []u8, arp_table: *const tcpipz.arp.Table, bytes: []const u8) !?[]const u8 {
-    const ip = tcpipz.ip;
-
+fn handleIp4(tx_buf: []u8, arp_table: *const arp.Table, bytes: []const u8) !?[]const u8 {
     const packet = try ip.parse(bytes);
     if (!ip.isForUs(packet)) return null;
     return switch (packet.protocol) {
@@ -94,18 +97,10 @@ fn handleIp4(tx_buf: []u8, arp_table: *const tcpipz.arp.Table, bytes: []const u8
     };
 }
 
-/// 振り分けられた ICMP メッセージを処理し、Echo Request には Echo Reply を返す
-fn handleIcmp(tx_buf: []u8, arp_table: *const tcpipz.arp.Table, packet: tcpipz.ip.Packet) !?[]const u8 {
-    const ip = tcpipz.ip;
-    const icmp = tcpipz.icmp;
-
+fn handleIcmp(tx_buf: []u8, arp_table: *const arp.Table, packet: ip.Packet) !?[]const u8 {
     const message = try icmp.parse(packet.payload);
-
-    // 答えるのは Echo Request だけ。Echo Reply に答えると往復が止まらなくなる
     if (message.type != .echo_request) return null;
-
-    // 宛先は要求の送信元。行きと帰りで src / dst が入れ替わる
-    var icmp_buf: [tcpipz.ethernet.mtu - ip.header_len_min]u8 = undefined;
+    var icmp_buf: [ethernet.mtu - ip.header_len_min]u8 = undefined;
     return try ip.output(
         tx_buf,
         arp_table,
@@ -119,15 +114,10 @@ fn handleIcmp(tx_buf: []u8, arp_table: *const tcpipz.arp.Table, packet: tcpipz.i
 const echo_port = 7;
 
 /// 振り分けられた UDP データグラムを処理し、echo ポート宛ならそのまま返す
-fn handleUdp(tx_buf: []u8, arp_table: *const tcpipz.arp.Table, packet: tcpipz.ip.Packet) !?[]const u8 {
-    const ip = tcpipz.ip;
-    const udp = tcpipz.udp;
-
+fn handleUdp(tx_buf: []u8, arp_table: *const arp.Table, packet: ip.Packet) !?[]const u8 {
     const datagram = try udp.parse(packet.payload, packet.src, packet.dst);
-
     if (datagram.dst_port != echo_port) return null;
-
-    var udp_buf: [tcpipz.ethernet.mtu - ip.header_len_min]u8 = undefined;
+    var udp_buf: [ethernet.mtu - ip.header_len_min]u8 = undefined;
     return try ip.output(tx_buf, arp_table, packet.src, .udp, try udp.build(
         &udp_buf,
         packet.src,
@@ -138,8 +128,6 @@ fn handleUdp(tx_buf: []u8, arp_table: *const tcpipz.arp.Table, packet: tcpipz.ip
 }
 
 test "自分宛の ARP 要求には応答を返し、送信元を学習する" {
-    const ethernet = tcpipz.ethernet;
-    const arp = tcpipz.arp;
     const sender_mac: ethernet.Mac = .{ 0xde, 0xda, 0x6c, 0x00, 0x2b, 0x9c };
     const sender_ip: arp.Ip4 = .{ 192, 168, 70, 1 };
 
@@ -171,8 +159,8 @@ test "自分宛の ARP 要求には応答を返し、送信元を学習する" {
 }
 
 test "捨てたフレームは null ではなく error で返る" {
-    var arp_table: tcpipz.arp.Table = .{};
-    var tx_buf: [tcpipz.ethernet.max_frame_len]u8 = undefined;
+    var arp_table: arp.Table = .{};
+    var tx_buf: [ethernet.max_frame_len]u8 = undefined;
 
     // 14 バイトに満たない = Ethernet ヘッダすら無い
     try std.testing.expectError(
@@ -182,8 +170,7 @@ test "捨てたフレームは null ではなく error で返る" {
 }
 
 test "返すものが無いフレームは null で返る" {
-    const ethernet = tcpipz.ethernet;
-    var arp_table: tcpipz.arp.Table = .{};
+    var arp_table: arp.Table = .{};
     var tx_buf: [ethernet.max_frame_len]u8 = undefined;
 
     var rx_buf: [ethernet.max_frame_len]u8 = undefined;
