@@ -8,6 +8,7 @@ pub const arp = @import("arp.zig");
 pub const ip = @import("ip.zig");
 pub const icmp = @import("icmp.zig");
 pub const udp = @import("udp.zig");
+pub const tcp = @import("tcp.zig");
 pub const socket = @import("socket.zig");
 pub const Tap = @import("Tap.zig");
 
@@ -22,5 +23,6 @@ test {
     _ = ip;
     _ = icmp;
     _ = udp;
+    _ = tcp;
     _ = socket;
 }

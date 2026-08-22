@@ -19,7 +19,7 @@ TCP/IP を理解することを目的とした、スモールステップの実�
 - [x] Step 13: UDP ヘッダと疑似ヘッダチェックサム
 - [x] Step 14: UDP echo サーバ 🏁
 - [x] Step 15: ポート多重化（ソケットテーブル）
-- [ ] Step 16: TCP ヘッダのパース
+- [x] Step 16: TCP ヘッダのパース
 - [ ] Step 17: RST 応答（CLOSED の振る舞い）
 - [ ] Step 18: 状態機械を純粋関数として実装
 - [ ] Step 19: 3-way handshake 🏁
